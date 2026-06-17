@@ -5,6 +5,7 @@
 //  Created by Joshua Sattler on 29.01.26.
 //
 
+import AppKit
 import KeyboardShortcuts
 import SwiftUI
 
@@ -21,6 +22,9 @@ struct BetterCaptureApp: App {
                     await viewModel.requestPermissionsOnLaunch()
                     registerKeyboardShortcuts()
                 }
+                .onOpenURL { url in
+                    handleURL(url)
+                }
         } label: {
             MenuBarLabel(viewModel: viewModel)
         }
@@ -29,6 +33,32 @@ struct BetterCaptureApp: App {
         // Settings window
         Settings {
             SettingsView(settings: viewModel.settings, updaterService: updaterService)
+        }
+    }
+
+    // MARK: - URL Scheme
+
+    private func handleURL(_ url: URL) {
+        guard url.scheme == "bettercapture" else { return }
+
+        switch url.host {
+        case "toggle":
+            Task { @MainActor in
+                await viewModel.toggleRecording()
+            }
+        case "open-recordings":
+            Task { @MainActor in
+                let settings = viewModel.settings
+                let didStart = settings.startAccessingOutputDirectory()
+                defer {
+                    if didStart {
+                        settings.stopAccessingOutputDirectory()
+                    }
+                }
+                NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: settings.outputDirectory.path)
+            }
+        default:
+            break
         }
     }
 

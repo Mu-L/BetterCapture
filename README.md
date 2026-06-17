@@ -46,6 +46,21 @@ Download the latest release from [GitHub Releases](https://github.com/jsattler/B
 
 **Requirements**: macOS 15.2 (Sequoia) or later
 
+## Automation
+
+BetterCapture supports a custom URL scheme for external tools (Raycast, Shortcuts, Alfred):
+
+| URL | Action |
+|---|---|
+| `bettercapture://toggle` | Toggle recording (same as the Toggle Recording shortcut) |
+| `bettercapture://open-recordings` | Open the output folder in Finder |
+
+Example:
+
+```bash
+open "bettercapture://toggle"
+```
+
 ## Contributing
 
 We welcome contributions of all kinds! Please see our [Contributing Guidelines](CONTRIBUTING.md) for more details on how to get involved.

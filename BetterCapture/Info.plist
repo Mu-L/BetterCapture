@@ -16,5 +16,16 @@
 	<string>SPARKLE_PUBLIC_KEY</string>
 	<key>SUEnableInstallerLauncherService</key>
 	<true/>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.sattlerjoshua.BetterCapture</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>bettercapture</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>

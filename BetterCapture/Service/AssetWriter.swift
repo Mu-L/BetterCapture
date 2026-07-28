@@ -289,7 +289,10 @@ final class AssetWriter: CaptureEngineSampleBufferDelegate, @unchecked Sendable 
     // MARK: - Finalization
 
     /// Finishes writing and finalizes the output file
-    func finishWriting() async throws -> URL {
+    /// - Returns: The output URL and the number of video frames written. A count of zero
+    ///            means the file holds audio only, which happens when the capture source
+    ///            stopped producing frames while audio kept flowing.
+    func finishWriting() async throws -> (url: URL, videoFrameCount: Int) {
         // First critical section: validate state and mark inputs as finished
         let (writerToFinish, url): (AVAssetWriter, URL)
 
@@ -351,6 +354,7 @@ final class AssetWriter: CaptureEngineSampleBufferDelegate, @unchecked Sendable 
             logger.info(
                 "AssetWriter finished writing \(self.frameCount) frames to: \(url.lastPathComponent)"
             )
+            let videoFrameCount = frameCount
             frameCount = 0
 
             // Clean up
@@ -360,7 +364,7 @@ final class AssetWriter: CaptureEngineSampleBufferDelegate, @unchecked Sendable 
             self.audioInput = nil
             self.microphoneInput = nil
 
-            return url
+            return (url, videoFrameCount)
         }
     }
 

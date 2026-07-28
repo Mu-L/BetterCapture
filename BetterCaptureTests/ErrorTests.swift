@@ -48,7 +48,8 @@ struct ErrorTests {
             .failedToCreateStream,
             .captureAlreadyRunning,
             .screenRecordingPermissionDenied,
-            .microphonePermissionDenied
+            .microphonePermissionDenied,
+            .selectedDisplayDisconnected
         ]
 
         for error in cases {

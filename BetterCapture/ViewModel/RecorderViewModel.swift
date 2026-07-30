@@ -284,15 +284,20 @@ final class RecorderViewModel {
             lastError = error
             cameraSession.stop()
             selectionBorderFrame.dismiss()
+
+            // The writer may already be set up and holding an empty output file. Cancel it
+            // before releasing the output directory, since that is where the file lives.
+            assetWriter.cancel()
             settings.stopAccessingOutputDirectory()
 
+            // lastError has no UI representation, so every start failure has to be surfaced
+            // as a notification - otherwise the record button silently does nothing.
+            notificationService.sendRecordingStartFailedNotification(error: error)
+
             // The selection points at a display that is gone, so drop it. The next recording
-            // attempt then opens the picker instead of failing the same way again. lastError
-            // has no UI representation, so the reason has to be surfaced as a notification.
+            // attempt then opens the picker instead of failing the same way again.
             if error as? CaptureError == .selectedDisplayDisconnected {
-                await resetAreaSelection()
-                captureEngine.clearSelection()
-                notificationService.sendRecordingFailedNotification(error: error)
+                await resetSelection()
             }
 
             logger.error("Failed to start recording: \(error.localizedDescription)")
@@ -345,12 +350,16 @@ final class RecorderViewModel {
         }
     }
 
-    /// Resets the area selection, removing the border frame and clearing state
-    func resetAreaSelection() async {
+    /// Resets the capture selection, removing the border frame and clearing state
+    ///
+    /// Covers both area and picker selections, so the capture engine's filter is cleared
+    /// alongside the view model's - otherwise the engine keeps a filter the UI no longer shows.
+    func resetSelection() async {
         selectedSourceRect = nil
         selectedScreenRect = nil
         selectedScreen = nil
         selectedContentFilter = nil
+        captureEngine.clearSelection()
         selectionBorderFrame.dismiss()
         recordingOverlay.dismiss()
         await previewService.stopPreview()

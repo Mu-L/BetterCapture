@@ -65,6 +65,24 @@ struct AssetWriterTests {
         #expect(result.videoFrameCount == 5)
     }
 
+    @Test func cancelAfterFinishingDoesNotDeleteTheSavedRecording() async throws {
+        let settings = makeStore()
+
+        let assetWriter = AssetWriter()
+        try assetWriter.setup(url: makeOutputURL(), settings: settings, videoSize: videoSize)
+        try assetWriter.startWriting()
+        assetWriter.appendVideoSample(try makeVideoSampleBuffer(at: .zero))
+
+        let result = try await assetWriter.finishWriting()
+        defer { try? FileManager.default.removeItem(at: result.url) }
+
+        // A failed setup for the next recording leaves the previous session's state in place,
+        // and the recovery path cancels the writer. The saved file must survive that.
+        assetWriter.cancel()
+
+        #expect(FileManager.default.fileExists(atPath: result.url.path()))
+    }
+
     @Test func recordingWithoutAnySampleThrows() async throws {
         let settings = makeStore()
 

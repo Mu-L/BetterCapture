@@ -126,6 +126,35 @@ final class NotificationService: NSObject {
         }
     }
 
+    /// Sends a notification for a recording that was saved without any video frames
+    /// - Parameter fileURL: The URL of the saved recording file
+    func sendRecordingMissingVideoNotification(fileURL: URL) {
+        let content = UNMutableNotificationContent()
+        content.title = "Recording Saved Without Video"
+        content.body = "No video was captured. Only audio was saved to \(fileURL.lastPathComponent)"
+        content.sound = .default
+        content.categoryIdentifier = NotificationIdentifier.categoryRecordingSaved
+
+        // Store the folder URL for opening when notification is clicked
+        let folderURL = fileURL.deletingLastPathComponent()
+        content.userInfo = [UserInfoKey.folderURL: folderURL.path()]
+
+        let request = UNNotificationRequest(
+            identifier: UUID().uuidString,
+            content: content,
+            trigger: nil
+        )
+
+        Task {
+            do {
+                try await UNUserNotificationCenter.current().add(request)
+                logger.info("Recording missing video notification sent")
+            } catch {
+                logger.error("Failed to send missing video notification: \(error.localizedDescription)")
+            }
+        }
+    }
+
     /// Sends a notification for a failed recording
     /// - Parameter error: The error that caused the recording to fail
     func sendRecordingFailedNotification(error: Error) {

@@ -285,6 +285,16 @@ final class RecorderViewModel {
             cameraSession.stop()
             selectionBorderFrame.dismiss()
             settings.stopAccessingOutputDirectory()
+
+            // The selection points at a display that is gone, so drop it. The next recording
+            // attempt then opens the picker instead of failing the same way again. lastError
+            // has no UI representation, so the reason has to be surfaced as a notification.
+            if error as? CaptureError == .selectedDisplayDisconnected {
+                await resetAreaSelection()
+                captureEngine.clearSelection()
+                notificationService.sendRecordingFailedNotification(error: error)
+            }
+
             logger.error("Failed to start recording: \(error.localizedDescription)")
         }
     }
@@ -304,7 +314,7 @@ final class RecorderViewModel {
             isPresenterOverlayActive = false
 
             // Finalize file
-            let outputURL = try await assetWriter.finishWriting()
+            let (outputURL, videoFrameCount) = try await assetWriter.finishWriting()
 
             state = .idle
             recordingDuration = 0
@@ -314,8 +324,14 @@ final class RecorderViewModel {
             // Brief delay to ensure screen sharing mode has fully stopped before sending notification
             try? await Task.sleep(for: .milliseconds(100))
 
-            // Send notification
-            notificationService.sendRecordingSavedNotification(fileURL: outputURL)
+            // Send notification. The file is kept either way - an audio-only recording is
+            // still worth more than a deleted one - but the user has to be told about it.
+            if videoFrameCount == 0 {
+                logger.error("Recording contains no video frames: \(outputURL.lastPathComponent)")
+                notificationService.sendRecordingMissingVideoNotification(fileURL: outputURL)
+            } else {
+                notificationService.sendRecordingSavedNotification(fileURL: outputURL)
+            }
 
             settings.stopAccessingOutputDirectory()
 

@@ -126,6 +126,12 @@ final class CaptureEngine: NSObject {
             }
         }
 
+        // A display selected before it was disconnected still yields a usable filter, but the
+        // stream never delivers frames. Fail fast instead of recording without a video track.
+        guard await contentFilterService.isSelectedDisplayConnected(filter) else {
+            throw CaptureError.selectedDisplayDisconnected
+        }
+
         // Apply content filter settings (wallpaper, dock, menu bar)
         logger.info("Applying content filter settings...")
         let filteredContent = try await contentFilterService.applySettings(to: filter, settings: settings)
@@ -366,12 +372,13 @@ extension CaptureEngine: SCStreamOutput {
 
 // MARK: - Errors
 
-enum CaptureError: LocalizedError {
+enum CaptureError: LocalizedError, Equatable {
     case noContentFilterSelected
     case failedToCreateStream
     case captureAlreadyRunning
     case screenRecordingPermissionDenied
     case microphonePermissionDenied
+    case selectedDisplayDisconnected
 
     var errorDescription: String? {
         switch self {
@@ -385,6 +392,8 @@ enum CaptureError: LocalizedError {
             return "Screen recording permission is required. Please grant permission in System Settings → Privacy & Security → Screen Recording."
         case .microphonePermissionDenied:
             return "Microphone permission is required. Please grant permission in System Settings → Privacy & Security → Microphone."
+        case .selectedDisplayDisconnected:
+            return "The selected display is no longer connected. Please select the content to capture again."
         }
     }
 }

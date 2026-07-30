@@ -52,6 +52,35 @@ final class ContentFilterService {
         }
     }
 
+    /// Checks whether the display targeted by a filter is still connected
+    ///
+    /// A display picked from the content picker is captured by its `displayID`. Disconnecting
+    /// the display leaves the filter intact but makes it produce no frames, so it has to be
+    /// validated against the currently connected displays before capture starts. Window and
+    /// application filters are not bound to a display and always pass.
+    /// - Parameter filter: The filter to validate
+    /// - Returns: true if the filter can still be captured
+    func isSelectedDisplayConnected(_ filter: SCContentFilter) async -> Bool {
+        guard filter.style == .display,
+              let displayID = filter.includedDisplays.first?.displayID else {
+            return true
+        }
+
+        guard let content = try? await SCShareableContent.current else {
+            // Nothing to validate against - let the capture attempt surface the real failure
+            logger.warning("Could not read shareable content, skipping display validation")
+            return true
+        }
+
+        let isConnected = content.displays.contains { $0.displayID == displayID }
+
+        if !isConnected {
+            logger.warning("Selected display \(displayID) is no longer connected")
+        }
+
+        return isConnected
+    }
+
     /// Applies user settings to a content filter for display capture
     /// - Parameters:
     ///   - filter: The original filter from the content picker

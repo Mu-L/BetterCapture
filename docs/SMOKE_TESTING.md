@@ -26,26 +26,27 @@ This document outlines the manual testing matrix for BetterCapture. These tests 
 | 18  | Permission recovery                 | Full display                          | H.264       | System + Mic mix   | SDR           | Denying then granting permissions works             | Test permission flow               |
 | 19  | Minimum area selection              | Custom area (24pt minimum)            | H.264       | No audio           | SDR           | Small area captured, no errors                      | Test boundary conditions           |
 | 20  | User stops sharing (system UI)      | Full display                          | H.264       | System audio only  | SDR           | Recording stops gracefully, file saved              | Click system "Stop Sharing" button |
+| 21  | Disconnected display still selected | Full display (external, unplugged)    | H.264       | System audio only  | SDR           | Start refused with notice, selection cleared        | Unplug display before recording    |
 
 ## Test Coverage Summary
 
 ### Content Sources (3 types)
 
-- **Full Display**: Tests 1, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 16, 17, 18, 20
+- **Full Display**: Tests 1, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 16, 17, 18, 20, 21
 - **Single Window**: Tests 2, 14
 - **Application Group**: Test 3
 - **Custom Area**: Tests 7, 19
 
 ### Video Codecs (4 types)
 
-- **H.264**: Tests 1, 6, 8, 9, 10, 11, 13, 16, 17, 18, 19, 20
+- **H.264**: Tests 1, 6, 8, 9, 10, 11, 13, 16, 17, 18, 19, 20, 21
 - **HEVC (H.265)**: Tests 2, 7, 12, 14, 15
 - **ProRes 422**: Tests 3, 5
 - **ProRes 4444**: Test 4
 
 ### Audio Configurations (4 types)
 
-- **System Audio Only**: Tests 1, 6, 7, 10, 11, 12, 17, 20
+- **System Audio Only**: Tests 1, 6, 7, 10, 11, 12, 17, 20, 21
 - **Microphone Only**: Test 8
 - **System + Microphone Mix**: Tests 3, 13, 18
 - **No Audio**: Tests 2, 4, 5, 9, 14, 15, 16, 19
@@ -63,7 +64,7 @@ This document outlines the manual testing matrix for BetterCapture. These tests 
 ### Edge Cases
 
 - **Long Duration**: Test 9
-- **Display Disconnect**: Test 10
+- **Display Disconnect**: Tests 10, 21
 - **System Sleep**: Test 11
 - **Live Content Change**: Test 12
 - **Permission Flow**: Test 18

@@ -357,12 +357,12 @@ final class AssetWriter: CaptureEngineSampleBufferDelegate, @unchecked Sendable 
             let videoFrameCount = frameCount
             frameCount = 0
 
-            // Clean up
             self.assetWriter = nil
             self.videoInput = nil
             self.pixelBufferAdaptor = nil
             self.audioInput = nil
             self.microphoneInput = nil
+            self.outputURL = nil
 
             return (url, videoFrameCount)
         }

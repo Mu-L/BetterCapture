@@ -100,100 +100,79 @@ final class NotificationService: NSObject {
     /// Sends a notification for a successfully saved recording
     /// - Parameter fileURL: The URL of the saved recording file
     func sendRecordingSavedNotification(fileURL: URL) {
-        let content = UNMutableNotificationContent()
-        content.title = "Recording Saved"
-        content.body = "Your recording has been saved to \(fileURL.lastPathComponent)"
-        content.sound = .default
-        content.categoryIdentifier = NotificationIdentifier.categoryRecordingSaved
-
-        // Store the folder URL for opening when notification is clicked
-        let folderURL = fileURL.deletingLastPathComponent()
-        content.userInfo = [UserInfoKey.folderURL: folderURL.path()]
-
-        let request = UNNotificationRequest(
-            identifier: UUID().uuidString,
-            content: content,
-            trigger: nil
+        send(
+            title: "Recording Saved",
+            body: "Your recording has been saved to \(fileURL.lastPathComponent)",
+            category: NotificationIdentifier.categoryRecordingSaved,
+            folderURL: fileURL.deletingLastPathComponent()
         )
-
-        Task {
-            do {
-                try await UNUserNotificationCenter.current().add(request)
-                logger.info("Recording saved notification sent")
-            } catch {
-                logger.error("Failed to send notification: \(error.localizedDescription)")
-            }
-        }
     }
 
     /// Sends a notification for a recording that was saved without any video frames
     /// - Parameter fileURL: The URL of the saved recording file
     func sendRecordingMissingVideoNotification(fileURL: URL) {
-        let content = UNMutableNotificationContent()
-        content.title = "Recording Saved Without Video"
-        content.body = "No video was captured. Only audio was saved to \(fileURL.lastPathComponent)"
-        content.sound = .default
-        content.categoryIdentifier = NotificationIdentifier.categoryRecordingSaved
-
-        // Store the folder URL for opening when notification is clicked
-        let folderURL = fileURL.deletingLastPathComponent()
-        content.userInfo = [UserInfoKey.folderURL: folderURL.path()]
-
-        let request = UNNotificationRequest(
-            identifier: UUID().uuidString,
-            content: content,
-            trigger: nil
+        send(
+            title: "Recording Saved Without Video",
+            body: "No video was captured. Only audio was saved to \(fileURL.lastPathComponent)",
+            category: NotificationIdentifier.categoryRecordingSaved,
+            folderURL: fileURL.deletingLastPathComponent()
         )
+    }
 
-        Task {
-            do {
-                try await UNUserNotificationCenter.current().add(request)
-                logger.info("Recording missing video notification sent")
-            } catch {
-                logger.error("Failed to send missing video notification: \(error.localizedDescription)")
-            }
-        }
+    /// Sends a notification for a recording that could not be started
+    ///
+    /// Start failures leave nothing on disk, so they are reported separately from
+    /// failures that lose an in-progress recording.
+    /// - Parameter error: The error that prevented the recording from starting
+    func sendRecordingStartFailedNotification(error: Error) {
+        send(
+            title: "Can't Start Recording",
+            body: error.localizedDescription,
+            category: NotificationIdentifier.categoryRecordingFailed
+        )
     }
 
     /// Sends a notification for a failed recording
     /// - Parameter error: The error that caused the recording to fail
     func sendRecordingFailedNotification(error: Error) {
-        let content = UNMutableNotificationContent()
-        content.title = "Recording Failed"
-        content.body = "Your recording could not be saved: \(error.localizedDescription)"
-        content.sound = .default
-        content.categoryIdentifier = NotificationIdentifier.categoryRecordingFailed
-
-        let request = UNNotificationRequest(
-            identifier: UUID().uuidString,
-            content: content,
-            trigger: nil
+        send(
+            title: "Recording Failed",
+            body: "Your recording could not be saved: \(error.localizedDescription)",
+            category: NotificationIdentifier.categoryRecordingFailed
         )
-
-        Task {
-            do {
-                try await UNUserNotificationCenter.current().add(request)
-                logger.info("Recording failed notification sent")
-            } catch {
-                logger.error("Failed to send failure notification: \(error.localizedDescription)")
-            }
-        }
     }
 
     /// Sends a notification when recording stopped unexpectedly
     /// - Parameter error: Optional error that caused the stop
     func sendRecordingStoppedNotification(error: Error?) {
+        let reason = error.map { ": \($0.localizedDescription)" } ?? ""
+
+        send(
+            title: "Recording Stopped",
+            body: "Recording stopped unexpectedly\(reason)",
+            category: NotificationIdentifier.categoryRecordingFailed
+        )
+    }
+
+    // MARK: - Private Methods
+
+    /// Builds and delivers a notification request
+    /// - Parameters:
+    ///   - title: The notification title
+    ///   - body: The notification body
+    ///   - category: The category identifier determining the available actions
+    ///   - folderURL: Folder to reveal when the notification is clicked, if any
+    private func send(title: String, body: String, category: String, folderURL: URL? = nil) {
         let content = UNMutableNotificationContent()
-        content.title = "Recording Stopped"
-
-        if let error {
-            content.body = "Recording stopped unexpectedly: \(error.localizedDescription)"
-        } else {
-            content.body = "Recording stopped unexpectedly"
-        }
-
+        content.title = title
+        content.body = body
         content.sound = .default
-        content.categoryIdentifier = NotificationIdentifier.categoryRecordingFailed
+        content.categoryIdentifier = category
+
+        // Store the folder URL for opening when notification is clicked
+        if let folderURL {
+            content.userInfo = [UserInfoKey.folderURL: folderURL.path()]
+        }
 
         let request = UNNotificationRequest(
             identifier: UUID().uuidString,
@@ -204,14 +183,12 @@ final class NotificationService: NSObject {
         Task {
             do {
                 try await UNUserNotificationCenter.current().add(request)
-                logger.info("Recording stopped notification sent")
+                logger.info("Notification sent: \(title)")
             } catch {
-                logger.error("Failed to send stopped notification: \(error.localizedDescription)")
+                logger.error("Failed to send notification '\(title)': \(error.localizedDescription)")
             }
         }
     }
-
-    // MARK: - Private Methods
 
     private func openFolderInFinder(path: String) {
         _ = settings.startAccessingOutputDirectory()

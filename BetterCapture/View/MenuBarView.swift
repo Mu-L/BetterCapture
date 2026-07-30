@@ -86,7 +86,7 @@ struct MenuBarView: View {
 
                 Button {
                     Task {
-                        await viewModel.resetAreaSelection()
+                        await viewModel.resetSelection()
                     }
                 } label: {
                     Text("Reset Selection")

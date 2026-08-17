@@ -238,12 +238,14 @@ final class CaptureEngine: NSObject {
             logger.info("Source rect set: \(sourceRect.origin.x),\(sourceRect.origin.y) \(sourceRect.width)x\(sourceRect.height)")
         }
 
-        // Frame rate - native uses display sync (1/120 timescale)
-        if settings.frameRate == .native {
-            config.minimumFrameInterval = CMTime(value: 1, timescale: 120)
-        } else {
-            config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(settings.frameRate.rawValue))
-        }
+        // Frame rate. `effectiveFrameRate` resolves `.native` to 60, matching the
+        // constant frame rate grid AssetWriter snaps the video track to.
+        config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(settings.frameRate.effectiveFrameRate))
+
+        // AssetWriter holds on to the two most recent frames so it can repeat the last
+        // one across a stall. The default queue depth of 3 would leave ScreenCaptureKit
+        // just one spare buffer, so give it more headroom.
+        config.queueDepth = 8
 
         // Cursor visibility
         config.showsCursor = settings.showCursor

@@ -23,9 +23,19 @@ Frame rate is the number of frames captured per second (fps). Common values:
 - **24 fps** -- Cinematic feel, smallest files.
 - **30 fps** -- Standard for most video. Good balance.
 - **60 fps** -- Smooth motion, important for UI animations and cursor movement. Doubles file size compared to 30 fps.
-- **Native** -- Matches the display's refresh rate (e.g. 120 Hz on ProMotion displays).
+- **Native** -- Follows the display, capped at 60 fps.
 
 Higher frame rates produce smoother playback at the cost of larger files and higher CPU/GPU load during capture.
+
+### Constant frame rate
+
+Recordings are written at a constant frame rate. ScreenCaptureKit only delivers a frame when the screen changes, and the timestamps it reports jitter by several milliseconds, so the raw stream is variable frame rate. BetterCapture snaps every frame onto a fixed grid at the selected rate and repeats the previous frame across any gap, which is what a static screen produces.
+
+This matters because variable frame rate files break tools that expect a constant rate. Concatenating them with `ffmpeg` or uploading them to a platform that transcodes to a fixed rate causes dropped frames and audio drift, even though the file plays back correctly in QuickTime and VLC.
+
+Repeated frames cost almost nothing for H.264 and HEVC. ProRes is intraframe, so a long recording of a static screen at Native will be noticeably larger than it used to be.
+
+All tracks -- video, system audio and microphone -- start at exactly zero. Audio devices take time to spin up, and a microphone in particular can be several hundred milliseconds late, so the start of each audio track is padded with silence.
 
 ## Codecs
 

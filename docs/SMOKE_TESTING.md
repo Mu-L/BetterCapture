@@ -20,7 +20,7 @@ This document outlines the manual testing matrix for BetterCapture. These tests 
 | 12  | Content picker during recording     | Full display → Window                 | HEVC        | System audio only  | SDR           | Can change content source while recording           | Update picker mid-recording        |
 | 13  | Presenter overlay recording         | Full display                          | H.264       | System + Mic mix   | SDR           | Camera overlay appears, no timing glitches          | Test CameraSession                 |
 | 14  | High frame rate recording           | Single window                         | HEVC        | No audio           | SDR           | 60 FPS output with smooth playback                  | Test frame rate setting            |
-| 15  | Native frame rate recording         | Full display (120Hz display)          | HEVC        | No audio           | SDR           | Adaptive frame rate matches display                 | Test native FPS                    |
+| 15  | Native frame rate recording         | Full display (120Hz display)          | HEVC        | No audio           | SDR           | Constant 60 fps output, `mediainfo` reports CFR     | Test native FPS                    |
 | 16  | Content filter toggles              | Full display                          | H.264       | No audio           | SDR           | Cursor/wallpaper/dock hidden as configured          | Test all filter options            |
 | 17  | PCM audio recording                 | Full display                          | H.264       | System audio (PCM) | SDR           | Uncompressed audio track, MOV container             | Test lossless audio                |
 | 18  | Permission recovery                 | Full display                          | H.264       | System + Mic mix   | SDR           | Denying then granting permissions works             | Test permission flow               |
@@ -104,4 +104,4 @@ This document outlines the manual testing matrix for BetterCapture. These tests 
 - PCM audio requires MOV container
 - MP4 container supports H.264/HEVC only, no alpha
 - Area selection requires minimum 24pt size
-- Native frame rate requires display with variable refresh rate
+- Native frame rate follows the display but is capped at 60 fps

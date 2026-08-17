@@ -16,6 +16,7 @@ import Testing
 /// while audio keeps flowing produces a file with audio tracks and no video track. The
 /// frame count is what lets the caller detect that case.
 @MainActor
+@Suite(.serialized)
 struct AssetWriterTests {
 
     private let videoSize = CGSize(width: 640, height: 480)
@@ -95,7 +96,225 @@ struct AssetWriterTests {
         }
     }
 
+    // MARK: - Constant frame rate
+
+    /// ScreenCaptureKit's `minimumFrameInterval` is a floor, not a cadence, so arrival
+    /// times jitter by several milliseconds. Every frame must still land exactly on the
+    /// grid, otherwise the file is variable frame rate and tools that resample to CFR
+    /// collapse neighbouring frames into one slot.
+    @Test func jitteredArrivalsSnapToTheFrameRateGrid() async throws {
+        let settings = makeStore()
+        settings.frameRate = .fps30
+
+        let assetWriter = AssetWriter()
+        try assetWriter.setup(url: makeOutputURL(), settings: settings, videoSize: videoSize)
+        try assetWriter.startWriting()
+
+        // Nominal 33.3 ms spacing, jittered the way a real capture jitters
+        for milliseconds in [0, 30, 63, 98, 137, 165] {
+            let time = CMTime(value: CMTimeValue(milliseconds), timescale: 1000)
+            assetWriter.appendVideoSample(try makeVideoSampleBuffer(at: time))
+        }
+
+        let result = try await assetWriter.finishWriting()
+        defer { try? FileManager.default.removeItem(at: result.url) }
+
+        let times = try await videoPresentationTimes(of: result.url)
+        #expect(times == (0..<6).map { CMTime(value: CMTimeValue($0), timescale: 30) })
+        #expect(result.videoFrameCount == 6)
+    }
+
+    /// A static screen makes ScreenCaptureKit stop delivering complete frames, which
+    /// previously left second-long holes in the track. The gap must be filled with the
+    /// last frame so the output stays CFR.
+    @Test func stalledCaptureFillsTheGapWithTheLastFrame() async throws {
+        let settings = makeStore()
+        settings.frameRate = .fps30
+
+        let assetWriter = AssetWriter()
+        try assetWriter.setup(url: makeOutputURL(), settings: settings, videoSize: videoSize)
+        try assetWriter.startWriting()
+
+        assetWriter.appendVideoSample(try makeVideoSampleBuffer(at: .zero))
+        // One second of silence from the capture source
+        assetWriter.appendVideoSample(try makeVideoSampleBuffer(at: CMTime(value: 1, timescale: 1)))
+
+        let result = try await assetWriter.finishWriting()
+        defer { try? FileManager.default.removeItem(at: result.url) }
+
+        let times = try await videoPresentationTimes(of: result.url)
+        #expect(times == (0...30).map { CMTime(value: CMTimeValue($0), timescale: 30) })
+        #expect(result.videoFrameCount == 31)
+    }
+
+    /// Filling is capped so a very long stall cannot block the capture queue.
+    @Test func fillIsCappedForVeryLongStalls() async throws {
+        let settings = makeStore()
+        settings.frameRate = .fps30
+
+        let assetWriter = AssetWriter()
+        try assetWriter.setup(url: makeOutputURL(), settings: settings, videoSize: videoSize)
+        try assetWriter.startWriting()
+
+        assetWriter.appendVideoSample(try makeVideoSampleBuffer(at: .zero))
+        // 20 s stall against a 10 s fill cap
+        assetWriter.appendVideoSample(try makeVideoSampleBuffer(at: CMTime(value: 20, timescale: 1)))
+
+        let result = try await assetWriter.finishWriting()
+        defer { try? FileManager.default.removeItem(at: result.url) }
+
+        // The first frame, then 300 frames of catch-up: 299 filled plus the frame that
+        // ended the stall. The 300 slots before that are skipped outright.
+        #expect(result.videoFrameCount == 301)
+
+        let times = try await videoPresentationTimes(of: result.url)
+        #expect(times.first == .zero)
+        #expect(times.last == CMTime(value: 600, timescale: 30))
+        #expect(isStrictlyIncreasing(times))
+    }
+
+    /// Two frames inside the same grid slot would produce a duplicate timestamp, which
+    /// is exactly what breaks downstream muxers.
+    @Test func framesLandingInTheSameSlotAreDropped() async throws {
+        let settings = makeStore()
+        settings.frameRate = .fps30
+
+        let assetWriter = AssetWriter()
+        try assetWriter.setup(url: makeOutputURL(), settings: settings, videoSize: videoSize)
+        try assetWriter.startWriting()
+
+        assetWriter.appendVideoSample(try makeVideoSampleBuffer(at: .zero))
+        // 10 ms later, well inside the 33.3 ms slot
+        assetWriter.appendVideoSample(try makeVideoSampleBuffer(at: CMTime(value: 10, timescale: 1000)))
+
+        let result = try await assetWriter.finishWriting()
+        defer { try? FileManager.default.removeItem(at: result.url) }
+
+        #expect(result.videoFrameCount == 1)
+    }
+
+    /// Presenter Overlay can emit an outright non-monotonic timestamp. One of those used
+    /// to fail the writer permanently.
+    @Test func nonMonotonicTimestampsDoNotFailTheWriter() async throws {
+        let settings = makeStore()
+        settings.frameRate = .fps30
+
+        let assetWriter = AssetWriter()
+        try assetWriter.setup(url: makeOutputURL(), settings: settings, videoSize: videoSize)
+        try assetWriter.startWriting()
+
+        for milliseconds in [0, 33, 67, 20, 100] {
+            let time = CMTime(value: CMTimeValue(milliseconds), timescale: 1000)
+            assetWriter.appendVideoSample(try makeVideoSampleBuffer(at: time))
+        }
+
+        let result = try await assetWriter.finishWriting()
+        defer { try? FileManager.default.removeItem(at: result.url) }
+
+        // The out-of-order frame is dropped, the rest are written in order
+        #expect(result.videoFrameCount == 4)
+        let times = try await videoPresentationTimes(of: result.url)
+        #expect(isStrictlyIncreasing(times))
+    }
+
+    // MARK: - Track origin
+
+    /// Audio usually arrives before the first complete video frame. Both tracks must
+    /// still resolve to a common origin of zero.
+    @Test func videoIsBackfilledWhenAudioOpensTheSession() async throws {
+        let settings = makeStore()
+        settings.captureSystemAudio = true
+        settings.audioCodec = .pcm
+        settings.frameRate = .fps30
+
+        let assetWriter = AssetWriter()
+        try assetWriter.setup(url: makeOutputURL(), settings: settings, videoSize: videoSize)
+        try assetWriter.startWriting()
+
+        // Audio anchors the session, video only starts 100 ms later
+        assetWriter.appendAudioSample(try makeSilentAudioSampleBuffer(at: .zero))
+        assetWriter.appendVideoSample(
+            try makeVideoSampleBuffer(at: CMTime(value: 100, timescale: 1000)))
+
+        let result = try await assetWriter.finishWriting()
+        defer { try? FileManager.default.removeItem(at: result.url) }
+
+        // Slots 0, 1 and 2 are back-filled so the video track also starts at zero
+        #expect(result.videoFrameCount == 4)
+        let times = try await videoPresentationTimes(of: result.url)
+        #expect(times.first == .zero)
+    }
+
+    /// A microphone can take hundreds of milliseconds to start delivering samples. The
+    /// head of the track is padded with silence so it still begins at zero, which is
+    /// what keeps concatenated recordings in sync.
+    @Test func lateMicrophoneIsPaddedWithSilence() async throws {
+        let settings = makeStore()
+        settings.captureSystemAudio = true
+        settings.captureMicrophone = true
+        settings.audioCodec = .pcm
+        settings.frameRate = .fps30
+
+        let assetWriter = AssetWriter()
+        try assetWriter.setup(url: makeOutputURL(), settings: settings, videoSize: videoSize)
+        try assetWriter.startWriting()
+
+        assetWriter.appendVideoSample(try makeVideoSampleBuffer(at: .zero))
+        assetWriter.appendAudioSample(try makeSilentAudioSampleBuffer(at: .zero))
+
+        // Microphone spins up 324 ms late, as measured on a real recording
+        let micStart = CMTime(value: 324, timescale: 1000)
+        for index in 0..<10 {
+            let offset = CMTime(value: CMTimeValue(index * 1024), timescale: 48000)
+            assetWriter.appendMicrophoneSample(
+                try makeSilentAudioSampleBuffer(at: micStart + offset))
+        }
+
+        let result = try await assetWriter.finishWriting()
+        defer { try? FileManager.default.removeItem(at: result.url) }
+
+        let asset = AVURLAsset(url: result.url)
+        let audioTracks = try await asset.loadTracks(withMediaType: .audio)
+        #expect(audioTracks.count == 2)
+
+        for track in audioTracks {
+            let timeRange = try await track.load(.timeRange)
+            #expect(timeRange.start == .zero)
+        }
+    }
+
     // MARK: - Helpers
+
+    private func isStrictlyIncreasing(_ times: [CMTime]) -> Bool {
+        zip(times, times.dropFirst()).allSatisfy { $0 < $1 }
+    }
+
+    /// Reads back every video frame's presentation timestamp, in presentation order.
+    ///
+    /// Decoding rather than reading compressed samples keeps the output one buffer per
+    /// frame in presentation order, free of the container's edit and marker buffers.
+    private func videoPresentationTimes(of url: URL) async throws -> [CMTime] {
+        let asset = AVURLAsset(url: url)
+        let track = try #require(await asset.loadTracks(withMediaType: .video).first)
+
+        let reader = try AVAssetReader(asset: asset)
+        let output = AVAssetReaderTrackOutput(
+            track: track,
+            outputSettings: [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+            ]
+        )
+        reader.add(output)
+        #expect(reader.startReading())
+
+        var times: [CMTime] = []
+        while let sample = output.copyNextSampleBuffer() {
+            guard CMSampleBufferGetNumSamples(sample) > 0 else { continue }
+            times.append(CMSampleBufferGetPresentationTimeStamp(sample))
+        }
+
+        return times
+    }
 
     /// Creates a SettingsStore backed by a fresh, empty UserDefaults suite.
     private func makeStore() -> SettingsStore {

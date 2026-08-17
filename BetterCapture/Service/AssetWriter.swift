@@ -32,12 +32,54 @@ final class AssetWriter: CaptureEngineSampleBufferDelegate, @unchecked Sendable 
 
     // Track if we've received the first sample
     private var hasStartedSession = false
-    private var sessionStartTime: CMTime = .zero
 
-    /// Last appended video presentation time — used to enforce monotonically
-    /// increasing timestamps and protect the writer from timing glitches that
-    /// occur when Presenter Overlay composites the camera into the stream.
-    private var lastVideoPresentationTime: CMTime = .invalid
+    /// Presentation timestamp of the first sample received on any track.
+    ///
+    /// Every track is rebased against this anchor so the file starts at zero
+    /// regardless of which track ScreenCaptureKit delivers first.
+    private var sessionAnchor: CMTime = .invalid
+
+    /// The constant frame rate the video track is written at.
+    ///
+    /// ScreenCaptureKit's `minimumFrameInterval` is a floor rather than a
+    /// cadence, so raw capture timestamps jitter and stall. Snapping every frame
+    /// to this grid - and duplicating the previous frame across skipped slots -
+    /// produces a genuine CFR track, which is what concatenation tools and video
+    /// platforms expect.
+    private var gridFrameRate: CMTimeScale = 60
+
+    /// Index of the last video frame appended, in `gridFrameRate` units. `-1` before
+    /// the first frame.
+    private var lastFrameIndex = -1
+
+    /// The most recently appended pixel buffer, reused to fill skipped grid slots.
+    private var lastPixelBuffer: CVPixelBuffer?
+
+    /// The newest frame from the capture source and the grid slot it belongs to,
+    /// waiting for the writer to accept it.
+    private var pendingPixelBuffer: CVPixelBuffer?
+    private var pendingIndex = -1
+
+    /// Set when the recording is stopping, so the drain loop closes the video input
+    /// once it has written everything queued.
+    private var isFinishingVideo = false
+    private var videoInputFinished = false
+    private var videoDrained: CheckedContinuation<Void, Never>?
+
+    private var hasLoggedFirstFrame = false
+
+    /// Serial queue the writer pulls video frames on when it is ready for more data.
+    private let videoDrainQueue = DispatchQueue(
+        label: "com.bettercapture.assetWriter.videoDrain", qos: .userInitiated)
+
+    /// Whether the head of each audio track has already been padded with silence.
+    private var hasPaddedAudio = false
+    private var hasPaddedMicrophone = false
+
+    /// Upper bound on how many frames a single gap may be filled with, as a
+    /// multiple of `gridFrameRate`. A capture that stalls for longer than this is
+    /// left with a hole rather than blocking the capture queue.
+    private static let maximumFillSeconds = 10
 
     /// The active HDR preset for this recording session, used to select the
     /// correct color properties for the output container and per-frame tagging.
@@ -75,10 +117,17 @@ final class AssetWriter: CaptureEngineSampleBufferDelegate, @unchecked Sendable 
             throw AssetWriterError.failedToCreateWriter
         }
 
+        // Snap video to a constant frame rate grid. `.native` reports 60, which is
+        // also the interval CaptureEngine configures for it.
+        gridFrameRate = CMTimeScale(settings.frameRate.effectiveFrameRate)
+
         // Configure video input
-        let videoSettings = createVideoSettings(from: settings, size: videoSize)
+        let videoSettings = AssetWriterSettings.video(from: settings, size: videoSize)
         videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
         videoInput?.expectsMediaDataInRealTime = true
+        // 600 is evenly divisible by every supported frame rate, so grid times are
+        // representable exactly and no rounding is introduced by the writer.
+        videoInput?.mediaTimeScale = 600
 
         if let videoInput, assetWriter.canAdd(videoInput) {
             assetWriter.add(videoInput)
@@ -103,7 +152,7 @@ final class AssetWriter: CaptureEngineSampleBufferDelegate, @unchecked Sendable 
 
         // Configure audio input for system audio
         if settings.captureSystemAudio {
-            let audioSettings = createAudioSettings(from: settings)
+            let audioSettings = AssetWriterSettings.audio(from: settings)
             audioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
             audioInput?.expectsMediaDataInRealTime = true
 
@@ -114,7 +163,7 @@ final class AssetWriter: CaptureEngineSampleBufferDelegate, @unchecked Sendable 
 
         // Configure microphone input as separate track
         if settings.captureMicrophone {
-            let micSettings = createAudioSettings(from: settings)
+            let micSettings = AssetWriterSettings.audio(from: settings)
             microphoneInput = AVAssetWriterInput(mediaType: .audio, outputSettings: micSettings)
             microphoneInput?.expectsMediaDataInRealTime = true
 
@@ -129,9 +178,7 @@ final class AssetWriter: CaptureEngineSampleBufferDelegate, @unchecked Sendable 
         tagBuffersWithHDRColorimetry = isProResHDR
 
         outputURL = url
-        hasStartedSession = false
-        sessionStartTime = .zero
-        lastVideoPresentationTime = .invalid
+        resetTimingState()
         frameCount = 0
 
         logger.info("AssetWriter configured for output: \(url.lastPathComponent)")
@@ -147,6 +194,13 @@ final class AssetWriter: CaptureEngineSampleBufferDelegate, @unchecked Sendable 
 
         guard assetWriter.startWriting() else {
             throw AssetWriterError.failedToStartWriting(assetWriter.error)
+        }
+
+        // Pull frames whenever the encoder drains. Without this a stall longer than one
+        // burst would be left half-filled, because the capture source has nothing to
+        // deliver while the screen is static.
+        videoInput?.requestMediaDataWhenReady(on: videoDrainQueue) { [weak self] in
+            self?.drainVideo()
         }
 
         isWriting = true
@@ -176,32 +230,17 @@ final class AssetWriter: CaptureEngineSampleBufferDelegate, @unchecked Sendable 
         }
 
         lock.withLockUnchecked {
-            guard let assetWriter,
-                assetWriter.status == .writing,
-                let videoInput,
-                videoInput.isReadyForMoreMediaData,
-                let adaptor = pixelBufferAdaptor
-            else {
-                return
-            }
+            guard let assetWriter, assetWriter.status == .writing else { return }
 
             let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+            startSessionIfNeeded(at: presentationTime)
 
-            // Start session on first sample
-            if !hasStartedSession {
-                assetWriter.startSession(atSourceTime: presentationTime)
-                sessionStartTime = presentationTime
-                hasStartedSession = true
-                logger.info("Session started at time: \(presentationTime.seconds)")
-            } else {
-                // Guard against non-monotonic timestamps. Presenter Overlay can
-                // cause timing glitches when compositing the camera into the
-                // stream; a single bad timestamp permanently fails the writer.
-                if lastVideoPresentationTime.isValid
-                    && presentationTime <= lastVideoPresentationTime {
-                    return
-                }
-            }
+            // Snap to the constant frame rate grid. Frames that land on a slot at or
+            // before one already claimed are dropped: capture jitter can deliver two
+            // frames inside a single slot, and Presenter Overlay can emit an outright
+            // non-monotonic timestamp, which permanently fails the writer.
+            let index = gridIndex(for: presentationTime)
+            guard index > pendingIndex else { return }
 
             // Extract pixel buffer from sample buffer
             guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
@@ -210,8 +249,9 @@ final class AssetWriter: CaptureEngineSampleBufferDelegate, @unchecked Sendable 
             }
 
             // Log incoming buffer properties on the first frame to aid HDR debugging.
-            if frameCount == 0 {
-                logPixelBufferProperties(pixelBuffer)
+            if !hasLoggedFirstFrame {
+                hasLoggedFirstFrame = true
+                AssetWriterSettings.logPixelBufferProperties(pixelBuffer)
             }
 
             // For ProRes HDR, inject BT.2020 / PQ colorimetry directly onto
@@ -224,22 +264,79 @@ final class AssetWriter: CaptureEngineSampleBufferDelegate, @unchecked Sendable 
                 CVBufferSetAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_2020, .shouldPropagate)
             }
 
-            // Append using the pixel buffer adaptor
-            if adaptor.append(pixelBuffer, withPresentationTime: presentationTime) {
-                lastVideoPresentationTime = presentationTime
-                frameCount += 1
-                if frameCount == 1 {
-                    logger.info("First video frame appended successfully")
+            // Hand the frame to the drain loop rather than appending here. The writer
+            // only accepts a short burst before `isReadyForMoreMediaData` goes false,
+            // and appending past that point wedges it.
+            pendingPixelBuffer = pixelBuffer
+            pendingIndex = index
+        }
+
+        drainVideo()
+    }
+
+    /// Writes queued frames for as long as the input accepts them.
+    ///
+    /// Runs both from the capture queue and from `requestMediaDataWhenReady`, so a stall
+    /// that outlasts a single burst is finished as soon as the encoder drains. Every slot
+    /// between the last frame written and the newest frame is filled with a repeat of the
+    /// last frame, which is what keeps the track at a constant frame rate.
+    private func drainVideo() {
+        lock.withLockUnchecked {
+            guard let assetWriter, assetWriter.status == .writing,
+                let videoInput, let adaptor = pixelBufferAdaptor, !videoInputFinished
+            else {
+                return
+            }
+
+            capFillIfStalled()
+
+            while videoInput.isReadyForMoreMediaData {
+                let slot = lastFrameIndex + 1
+
+                // Fall back to the pending frame while no frame has been written yet, so
+                // an audio track that opened the session earlier gets back-filled.
+                guard slot <= pendingIndex,
+                    let pixelBuffer = slot == pendingIndex
+                        ? pendingPixelBuffer : (lastPixelBuffer ?? pendingPixelBuffer)
+                else {
+                    // Caught up. Close the track once the recording is stopping.
+                    if isFinishingVideo {
+                        videoInput.markAsFinished()
+                        videoInputFinished = true
+                        videoDrained?.resume()
+                        videoDrained = nil
+                    }
+                    return
                 }
-            } else {
-                if let error = assetWriter.error {
+
+                let gridTime = CMTime(value: CMTimeValue(slot), timescale: gridFrameRate)
+                guard adaptor.append(pixelBuffer, withPresentationTime: gridTime) else {
                     logger.error(
-                        "Failed to append video pixel buffer: \(error.localizedDescription)")
-                } else {
-                    logger.error("Failed to append video pixel buffer - no error available")
+                        "Failed to append video pixel buffer: \(assetWriter.error?.localizedDescription ?? "no error available")"
+                    )
+                    return
+                }
+
+                lastFrameIndex = slot
+                frameCount += 1
+                if slot == pendingIndex {
+                    lastPixelBuffer = pixelBuffer
                 }
             }
         }
+    }
+
+    /// Skips ahead when a stall is longer than the fill cap, so a capture source that
+    /// went away for minutes cannot make the drain loop write thousands of frames.
+    private func capFillIfStalled() {
+        let maximumFill = Int(gridFrameRate) * Self.maximumFillSeconds
+        let missing = pendingIndex - lastFrameIndex
+        guard missing > maximumFill else { return }
+
+        logger.warning(
+            "Capture stalled for \(Double(missing) / Double(self.gridFrameRate))s - filling only \(maximumFill) frames"
+        )
+        lastFrameIndex = pendingIndex - maximumFill
     }
 
     /// Appends a system audio sample buffer - called synchronously from capture queue
@@ -253,19 +350,14 @@ final class AssetWriter: CaptureEngineSampleBufferDelegate, @unchecked Sendable 
                 return
             }
 
-            let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+            startSessionIfNeeded(at: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
 
-            // Start session on first sample if video hasn't started it yet
-            if !hasStartedSession {
-                assetWriter.startSession(atSourceTime: presentationTime)
-                sessionStartTime = presentationTime
-                hasStartedSession = true
-                logger.info("Session started at time: \(presentationTime.seconds)")
+            if !hasPaddedAudio {
+                hasPaddedAudio = true
+                padWithSilence(sampleBuffer, into: audioInput, label: "system audio")
             }
 
-            if !audioInput.append(sampleBuffer) {
-                logger.error("Failed to append audio sample buffer")
-            }
+            append(sampleBuffer, rebasedInto: audioInput, label: "audio")
         }
     }
 
@@ -280,10 +372,148 @@ final class AssetWriter: CaptureEngineSampleBufferDelegate, @unchecked Sendable 
                 return
             }
 
-            if !microphoneInput.append(sampleBuffer) {
-                logger.error("Failed to append microphone sample buffer")
+            startSessionIfNeeded(at: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
+
+            if !hasPaddedMicrophone {
+                hasPaddedMicrophone = true
+                padWithSilence(sampleBuffer, into: microphoneInput, label: "microphone")
+            }
+
+            append(sampleBuffer, rebasedInto: microphoneInput, label: "microphone")
+        }
+    }
+
+    // MARK: - Timing
+
+    /// Opens the writing session on the first sample from any track.
+    ///
+    /// The anchor is shared by video and both audio tracks so they all resolve to a
+    /// common origin of zero.
+    private func startSessionIfNeeded(at presentationTime: CMTime) {
+        guard !hasStartedSession, let assetWriter else { return }
+
+        sessionAnchor = presentationTime
+        hasStartedSession = true
+        assetWriter.startSession(atSourceTime: .zero)
+        logger.info("Session anchored at capture time: \(presentationTime.seconds)")
+    }
+
+    /// Converts a capture timestamp into an index on the constant frame rate grid.
+    private func gridIndex(for presentationTime: CMTime) -> Int {
+        let elapsed = (presentationTime - sessionAnchor).seconds
+        guard elapsed.isFinite else { return lastFrameIndex + 1 }
+        return max(0, Int((elapsed * Double(gridFrameRate)).rounded()))
+    }
+
+    /// Writes silence covering the gap between the session anchor and this track's
+    /// first sample, so the track begins at time zero.
+    private func padWithSilence(
+        _ sampleBuffer: CMSampleBuffer, into input: AVAssetWriterInput, label: String
+    ) {
+        let offset = CMSampleBufferGetPresentationTimeStamp(sampleBuffer) - sessionAnchor
+        guard offset.isNumeric, offset > .zero,
+            let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer),
+            let silence = SilentAudioBuffer.make(
+                matching: formatDescription, duration: offset, at: .zero)
+        else {
+            return
+        }
+
+        if input.append(silence) {
+            logger.info("Padded \(label) with \(offset.seconds * 1000, format: .fixed(precision: 1))ms of silence")
+        } else {
+            logger.error("Failed to pad \(label) with silence")
+        }
+    }
+
+    /// Rebases a sample buffer against the session anchor and appends it.
+    private func append(
+        _ sampleBuffer: CMSampleBuffer, rebasedInto input: AVAssetWriterInput, label: String
+    ) {
+        guard let rebased = rebase(sampleBuffer) else {
+            logger.error("Failed to rebase \(label) sample buffer")
+            return
+        }
+
+        if !input.append(rebased) {
+            logger.error("Failed to append \(label) sample buffer")
+        }
+    }
+
+    /// Returns a copy of `sampleBuffer` with its timestamps shifted so the session
+    /// anchor maps to zero.
+    private func rebase(_ sampleBuffer: CMSampleBuffer) -> CMSampleBuffer? {
+        guard var timings = try? sampleBuffer.sampleTimingInfos() else { return nil }
+
+        for index in timings.indices {
+            timings[index].presentationTimeStamp = CMTimeSubtract(
+                timings[index].presentationTimeStamp, sessionAnchor)
+            if timings[index].decodeTimeStamp.isNumeric {
+                timings[index].decodeTimeStamp = CMTimeSubtract(
+                    timings[index].decodeTimeStamp, sessionAnchor)
             }
         }
+
+        var copy: CMSampleBuffer?
+        let status = CMSampleBufferCreateCopyWithNewTiming(
+            allocator: kCFAllocatorDefault,
+            sampleBuffer: sampleBuffer,
+            sampleTimingEntryCount: CMItemCount(timings.count),
+            sampleTimingArray: &timings,
+            sampleBufferOut: &copy
+        )
+
+        guard status == noErr else { return nil }
+        return copy
+    }
+
+    /// Suspends until the drain loop has written every queued frame and closed the
+    /// video input.
+    ///
+    /// Returns immediately when there is no video input, or when the writer already
+    /// stopped accepting data, so a failed or audio-only recording cannot hang here.
+    private func waitForVideoDrain() async {
+        await withCheckedContinuation { continuation in
+            let shouldWait = lock.withLockUnchecked { () -> Bool in
+                guard videoInput != nil, !videoInputFinished,
+                    assetWriter?.status == .writing
+                else {
+                    return false
+                }
+
+                videoDrained = continuation
+                return true
+            }
+
+            if !shouldWait {
+                continuation.resume()
+                return
+            }
+
+            // Kick the loop in case the input is already ready and idle
+            videoDrainQueue.async { [weak self] in self?.drainVideo() }
+        }
+    }
+
+    /// Clears all per-recording timing state.
+    ///
+    /// Any caller still waiting on the drain is released, so cancelling a recording
+    /// cannot strand `finishWriting`.
+    private func resetTimingState() {
+        videoDrained?.resume()
+        videoDrained = nil
+
+        hasStartedSession = false
+        sessionAnchor = .invalid
+        lastFrameIndex = -1
+        lastPixelBuffer = nil
+        pendingPixelBuffer = nil
+        pendingIndex = -1
+        isFinishingVideo = false
+        videoInputFinished = false
+        hasLoggedFirstFrame = false
+        hasPaddedAudio = false
+        hasPaddedMicrophone = false
     }
 
     // MARK: - Finalization
@@ -293,7 +523,7 @@ final class AssetWriter: CaptureEngineSampleBufferDelegate, @unchecked Sendable 
     ///            means the file holds audio only, which happens when the capture source
     ///            stopped producing frames while audio kept flowing.
     func finishWriting() async throws -> (url: URL, videoFrameCount: Int) {
-        // First critical section: validate state and mark inputs as finished
+        // First critical section: validate state and let the drain loop close the video
         let (writerToFinish, url): (AVAssetWriter, URL)
 
         do {
@@ -316,17 +546,31 @@ final class AssetWriter: CaptureEngineSampleBufferDelegate, @unchecked Sendable 
                     throw AssetWriterError.noFramesWritten
                 }
 
-                // Mark inputs as finished
-                videoInput?.markAsFinished()
-                audioInput?.markAsFinished()
-                microphoneInput?.markAsFinished()
-
+                isFinishingVideo = true
                 return (assetWriter, url)
             }
         } catch AssetWriterError.noFramesWritten {
             // Cancel needs to be called outside the lock since it acquires its own lock
             cancel()
             throw AssetWriterError.noFramesWritten
+        }
+
+        // Let the drain loop write everything still queued, then close the video input.
+        // The encoder only accepts a burst at a time, so this may take several passes.
+        await waitForVideoDrain()
+
+        lock.withLockUnchecked {
+            // Close the session on the grid boundary after the last frame so the video
+            // track's duration is exact instead of inferred from the final sample.
+            // Audio-only recordings end at the last audio sample instead.
+            if lastFrameIndex >= 0 {
+                writerToFinish.endSession(
+                    atSourceTime: CMTime(
+                        value: CMTimeValue(lastFrameIndex + 1), timescale: gridFrameRate))
+            }
+
+            audioInput?.markAsFinished()
+            microphoneInput?.markAsFinished()
         }
 
         // Finish writing (outside lock since it's async)
@@ -346,8 +590,7 @@ final class AssetWriter: CaptureEngineSampleBufferDelegate, @unchecked Sendable 
             }
 
             isWriting = false
-            hasStartedSession = false
-            lastVideoPresentationTime = .invalid
+            resetTimingState()
             activeHDRPreset = .sdr
             tagBuffersWithHDRColorimetry = false
 
@@ -373,8 +616,7 @@ final class AssetWriter: CaptureEngineSampleBufferDelegate, @unchecked Sendable 
         lock.withLockUnchecked {
             assetWriter?.cancelWriting()
             isWriting = false
-            hasStartedSession = false
-            lastVideoPresentationTime = .invalid
+            resetTimingState()
             activeHDRPreset = .sdr
             tagBuffersWithHDRColorimetry = false
             frameCount = 0
@@ -395,153 +637,6 @@ final class AssetWriter: CaptureEngineSampleBufferDelegate, @unchecked Sendable 
         }
     }
 
-    // MARK: - Settings Helpers
-
-    private func createVideoSettings(from settings: SettingsStore, size: CGSize) -> [String: Any] {
-        var videoSettings: [String: Any] = [
-            AVVideoWidthKey: Int(size.width),
-            AVVideoHeightKey: Int(size.height)
-        ]
-
-        let hdrPreset = settings.hdrPreset
-
-        switch settings.videoCodec {
-        case .h264:
-            videoSettings[AVVideoCodecKey] = AVVideoCodecType.h264
-
-        case .hevc:
-            if settings.captureAlphaChannel {
-                videoSettings[AVVideoCodecKey] = AVVideoCodecType.hevcWithAlpha
-            } else {
-                videoSettings[AVVideoCodecKey] = AVVideoCodecType.hevc
-            }
-
-        case .proRes422:
-            videoSettings[AVVideoCodecKey] = AVVideoCodecType.proRes422
-
-        case .proRes4444:
-            videoSettings[AVVideoCodecKey] = AVVideoCodecType.proRes4444
-        }
-
-        // Add compression properties for H.264 and HEVC to control bitrate.
-        // ProRes codecs use fixed-quality encoding and don't need these.
-        if let bpp = settings.videoQuality.bitsPerPixel(for: settings.videoCodec) {
-            let frameRate = settings.frameRate.effectiveFrameRate
-            let bitrate = Int(size.width * size.height * bpp * frameRate)
-
-            var compressionProperties: [String: Any] = [
-                AVVideoAverageBitRateKey: bitrate,
-                AVVideoExpectedSourceFrameRateKey: frameRate,
-                AVVideoMaxKeyFrameIntervalKey: Int(frameRate * 2)
-            ]
-
-            // HEVC HDR: enforce Main 10 profile to prevent 8-bit fallback and
-            // enable automatic HDR metadata insertion (HDR10 / Dolby Vision).
-            if settings.videoCodec == .hevc && hdrPreset != .sdr {
-                compressionProperties[AVVideoProfileLevelKey] =
-                    kVTProfileLevel_HEVC_Main10_AutoLevel as String
-                compressionProperties[kVTCompressionPropertyKey_HDRMetadataInsertionMode as String] =
-                    kVTHDRMetadataInsertionMode_Auto as String
-            }
-
-            videoSettings[AVVideoCompressionPropertiesKey] = compressionProperties
-
-            logger.info(
-                "Video compression: \(bitrate / 1_000_000) Mbps at \(Int(frameRate)) fps (\(settings.videoQuality.rawValue) quality)"
-            )
-        }
-
-        // Color space tagging strategy differs by codec:
-        //
-        // HEVC HDR: Tag via AVVideoColorPropertiesKey with BT.2020 / PQ.
-        //   The encoder writes the correct 'colr' atom and VUI parameters.
-        //
-        // ProRes HDR: Do NOT set AVVideoColorPropertiesKey. AVAssetWriter
-        //   prohibits automatic color matching for the high-bit-depth pixel
-        //   formats ProRes uses. Instead, BT.2020 / PQ colorimetry is
-        //   injected per-frame via CVBufferSetAttachment in appendVideoSample().
-        //
-        // SDR (all codecs): Tag with Rec. 709 to ensure 'colr' atoms and
-        //   VUI parameters are written.
-        let isProRes = settings.videoCodec == .proRes422 || settings.videoCodec == .proRes4444
-
-        if isProRes && hdrPreset != .sdr {
-            // Color properties are tagged per-frame via CVBufferSetAttachment.
-        } else if hdrPreset != .sdr {
-            videoSettings[AVVideoColorPropertiesKey] = [
-                AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_2020,
-                AVVideoTransferFunctionKey: AVVideoTransferFunction_SMPTE_ST_2084_PQ,
-                AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_2020
-            ]
-        } else {
-            videoSettings[AVVideoColorPropertiesKey] = [
-                AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_709_2,
-                AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
-                AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2
-            ]
-        }
-
-        return videoSettings
-    }
-
-    /// Logs the pixel format, color space, and matrix of an incoming pixel buffer
-    /// to help diagnose HDR color mismatches.
-    private func logPixelBufferProperties(_ pixelBuffer: CVPixelBuffer) {
-        let pixelFormat = CVPixelBufferGetPixelFormatType(pixelBuffer)
-        let fourCC = String(format: "%c%c%c%c",
-                            (pixelFormat >> 24) & 0xFF,
-                            (pixelFormat >> 16) & 0xFF,
-                            (pixelFormat >> 8) & 0xFF,
-                            pixelFormat & 0xFF)
-
-        let primaries = CVBufferCopyAttachment(pixelBuffer, kCVImageBufferColorPrimariesKey, nil)
-            as? String ?? "none"
-        let transfer = CVBufferCopyAttachment(pixelBuffer, kCVImageBufferTransferFunctionKey, nil)
-            as? String ?? "none"
-        let matrix = CVBufferCopyAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey, nil)
-            as? String ?? "none"
-
-        let colorSpaceName: String
-        if let cgColorSpace = CVImageBufferGetColorSpace(pixelBuffer)?.takeUnretainedValue() {
-            colorSpaceName = cgColorSpace.name as String? ?? "unnamed"
-        } else {
-            colorSpaceName = "nil"
-        }
-
-        logger.info(
-            """
-            First frame buffer properties — \
-            pixelFormat: \(fourCC) (0x\(String(pixelFormat, radix: 16))), \
-            colorPrimaries: \(primaries), \
-            transferFunction: \(transfer), \
-            yCbCrMatrix: \(matrix), \
-            CGColorSpace: \(colorSpaceName)
-            """
-        )
-    }
-
-    private func createAudioSettings(from settings: SettingsStore) -> [String: Any] {
-        switch settings.audioCodec {
-        case .aac:
-            return [
-                AVFormatIDKey: kAudioFormatMPEG4AAC,
-                AVSampleRateKey: 48000,
-                AVNumberOfChannelsKey: 2,
-                AVEncoderBitRateKey: 256000
-            ]
-
-        case .pcm:
-            return [
-                AVFormatIDKey: kAudioFormatLinearPCM,
-                AVSampleRateKey: 48000,
-                AVNumberOfChannelsKey: 2,
-                AVLinearPCMBitDepthKey: 16,
-                AVLinearPCMIsFloatKey: false,
-                AVLinearPCMIsBigEndianKey: false,
-                AVLinearPCMIsNonInterleaved: false
-            ]
-        }
-    }
 }
 
 // MARK: - CaptureEngineSampleBufferDelegate
@@ -564,33 +659,5 @@ extension AssetWriter {
         _ engine: CaptureEngine, didOutputMicrophoneSampleBuffer sampleBuffer: CMSampleBuffer
     ) {
         appendMicrophoneSample(sampleBuffer)
-    }
-}
-
-// MARK: - Errors
-
-enum AssetWriterError: LocalizedError {
-    case failedToCreateWriter
-    case writerNotReady
-    case failedToStartWriting(Error?)
-    case writingFailed(Error?)
-    case noOutputURL
-    case noFramesWritten
-
-    var errorDescription: String? {
-        switch self {
-        case .failedToCreateWriter:
-            return "Failed to create the asset writer."
-        case .writerNotReady:
-            return "The asset writer is not ready for writing."
-        case .failedToStartWriting(let error):
-            return "Failed to start writing: \(error?.localizedDescription ?? "Unknown error")"
-        case .writingFailed(let error):
-            return "Writing failed: \(error?.localizedDescription ?? "Unknown error")"
-        case .noOutputURL:
-            return "No output URL was configured."
-        case .noFramesWritten:
-            return "No video frames were captured. Check screen recording permissions."
-        }
     }
 }

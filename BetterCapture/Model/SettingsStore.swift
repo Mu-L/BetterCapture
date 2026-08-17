@@ -160,13 +160,15 @@ enum FrameRate: Int, CaseIterable, Identifiable {
         }
     }
 
-    /// The effective frame rate in Hz for encoding calculations (e.g. bitrate).
+    /// The frame rate in Hz the recording is captured and written at.
     ///
-    /// For explicit rates this returns the selected value. For `.native` it
-    /// returns 60 as a practical upper bound. Although `CaptureEngine` sets a
-    /// minimum interval of 1/120s, ScreenCaptureKit only delivers frames when
-    /// content changes, so actual rates are typically well below 120. Using 60
-    /// avoids inflating the bitrate budget beyond what the encoder will use.
+    /// For explicit rates this returns the selected value. `.native` resolves to
+    /// 60: ScreenCaptureKit only delivers frames when content changes, so a
+    /// higher ceiling produced a heavily variable frame rate that broke
+    /// concatenation and upload tools without adding useful frames.
+    ///
+    /// `CaptureEngine` uses this for `minimumFrameInterval`, `AssetWriter` uses it
+    /// as the constant frame rate grid, and both use it for the bitrate budget.
     var effectiveFrameRate: Double {
         switch self {
         case .native: 60.0

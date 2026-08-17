@@ -8,8 +8,8 @@
 
 /* Begin PBXBuildFile section */
 		6C5C123D2F3893FE0082CE23 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 6C0990E12F2BE0C200D48100 /* Sparkle */; };
-		6CA1B0012F8700000082CE23 /* KeyboardShortcuts in Frameworks */ = {isa = PBXBuildFile; productRef = 6CA1B0002F8700000082CE23 /* KeyboardShortcuts */; };
 		6C7AABCC2F783CC3006496CE /* BetterCapture.xctestplan in Resources */ = {isa = PBXBuildFile; fileRef = 6C7AABCB2F783CC3006496CE /* BetterCapture.xctestplan */; };
+		6CA1B0012F8700000082CE23 /* KeyboardShortcuts in Frameworks */ = {isa = PBXBuildFile; productRef = 6CA1B0002F8700000082CE23 /* KeyboardShortcuts */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */

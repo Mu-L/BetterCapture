@@ -212,15 +212,7 @@ struct AudioSettingsView: View {
 
 struct GeneralSettingsView: View {
     @Bindable var settings: SettingsStore
-    var updaterService: UpdaterService
-
-    @State private var automaticallyChecksForUpdates: Bool
-
-    init(settings: SettingsStore, updaterService: UpdaterService) {
-        self.settings = settings
-        self.updaterService = updaterService
-        self._automaticallyChecksForUpdates = State(initialValue: updaterService.automaticallyChecksForUpdates)
-    }
+    @Bindable var updaterService: UpdaterService
 
     /// Formats the output directory path for display
     private var displayPath: String {
@@ -260,10 +252,7 @@ struct GeneralSettingsView: View {
             }
 
             Section("Software Updates") {
-                Toggle("Automatically check for updates", isOn: $automaticallyChecksForUpdates)
-                    .onChange(of: automaticallyChecksForUpdates) { _, newValue in
-                        updaterService.automaticallyChecksForUpdates = newValue
-                    }
+                Toggle("Automatically check for updates", isOn: $updaterService.automaticallyChecksForUpdates)
 
                 LabeledContent("Updates") {
                     Button("Check for Update") {

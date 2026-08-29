@@ -36,8 +36,15 @@ final class UpdaterService {
     /// Whether Sparkle should automatically check for updates.
     /// This directly reads/writes Sparkle's own user-defaults-backed property.
     var automaticallyChecksForUpdates: Bool {
-        get { updater.automaticallyChecksForUpdates }
-        set { updater.automaticallyChecksForUpdates = newValue }
+        get {
+            access(keyPath: \.automaticallyChecksForUpdates)
+            return updater.automaticallyChecksForUpdates
+        }
+        set {
+            withMutation(keyPath: \.automaticallyChecksForUpdates) {
+                updater.automaticallyChecksForUpdates = newValue
+            }
+        }
     }
 
     // MARK: - Initialization
@@ -51,8 +58,6 @@ final class UpdaterService {
             updaterDelegate: nil,
             userDriverDelegate: nil
         )
-
-        guard hasValidKey else { return }
 
         // Observe Sparkle's canCheckForUpdates via KVO
         canCheckObservation = updater.observe(

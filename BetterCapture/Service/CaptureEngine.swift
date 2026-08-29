@@ -137,7 +137,7 @@ final class CaptureEngine: NSObject {
         let filteredContent = try await contentFilterService.applySettings(to: filter, settings: settings)
         logger.info("Content filter applied, creating stream...")
 
-        let streamConfig = createStreamConfiguration(from: settings, contentSize: videoSize, sourceRect: sourceRect)
+        let streamConfig = createStreamConfiguration(from: settings, contentSize: videoSize, sourceRect: sourceRect, isWindowCapture: filteredContent.style == .window)
 
         stream = SCStream(filter: filteredContent, configuration: streamConfig, delegate: self)
 
@@ -196,7 +196,13 @@ final class CaptureEngine: NSObject {
     ///   - settings: The settings store containing capture configuration
     ///   - contentSize: The output dimensions for the captured video
     ///   - sourceRect: Optional rectangle for area selection (display points, top-left origin)
-    private func createStreamConfiguration(from settings: SettingsStore, contentSize: CGSize, sourceRect: CGRect? = nil) -> SCStreamConfiguration {
+    ///   - isWindowCapture: Whether the filter captures a single window
+    private func createStreamConfiguration(
+        from settings: SettingsStore,
+        contentSize: CGSize,
+        sourceRect: CGRect? = nil,
+        isWindowCapture: Bool = false
+    ) -> SCStreamConfiguration {
         let config: SCStreamConfiguration
 
         switch settings.hdrPreset {
@@ -231,6 +237,15 @@ final class CaptureEngine: NSObject {
         // Set output dimensions - required for proper capture
         config.width = Int(contentSize.width)
         config.height = Int(contentSize.height)
+
+        // Independent window capture is the one mode where ScreenCaptureKit does not resize content
+        // to the configured dimensions on its own: it renders the window at its natural pixel size
+        // in the top-left corner and leaves the rest of the buffer blank. Scaling to fit keeps the
+        // content filling the frame even if the dimensions above are ever wrong again, rather than
+        // silently baking a crop into the recording.
+        if isWindowCapture {
+            config.scalesToFit = true
+        }
 
         // Set source rect for area selection (only works with display captures)
         if let sourceRect {

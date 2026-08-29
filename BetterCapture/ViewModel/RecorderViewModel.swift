@@ -416,21 +416,21 @@ final class RecorderViewModel {
         // If area selection is active, use the source rect dimensions.
         // The sourceRect is already snapped to even pixel counts in presentAreaSelection().
         if let sourceRect = selectedSourceRect {
-            let scale = CGFloat(filter.pointPixelScale)
-            return CGSize(
-                width: applyScale ? sourceRect.width * scale : sourceRect.width,
-                height: applyScale ? sourceRect.height * scale : sourceRect.height
+            return CaptureSizeCalculator.videoSize(
+                contentRect: sourceRect,
+                scale: CGFloat(filter.pointPixelScale),
+                useNativeResolution: applyScale
             )
         }
 
         // Get the content rect from the filter
         let rect = filter.contentRect
-        let scale = CGFloat(filter.pointPixelScale)
 
         if rect.width > 0 && rect.height > 0 {
-            return CGSize(
-                width: applyScale ? rect.width * scale : rect.width,
-                height: applyScale ? rect.height * scale : rect.height
+            return CaptureSizeCalculator.videoSize(
+                contentRect: rect,
+                scale: pointPixelScale(for: filter),
+                useNativeResolution: applyScale
             )
         }
 
@@ -443,6 +443,36 @@ final class RecorderViewModel {
         }
 
         return CGSize(width: 1920, height: 1080)
+    }
+
+    /// The point-to-pixel scale to size the capture with.
+    ///
+    /// Window captures cannot trust `SCContentFilter.pointPixelScale`: it reports the main
+    /// display's scale for a window on a display arranged above the primary one, which sizes the
+    /// video larger than ScreenCaptureKit renders and pads the output. Resolve the scale from the
+    /// display the window actually occupies instead.
+    private func pointPixelScale(for filter: SCContentFilter) -> CGFloat {
+        let reported = CGFloat(filter.pointPixelScale)
+
+        guard filter.style == .window, let window = filter.includedWindows.first else {
+            return reported
+        }
+
+        return CaptureSizeCalculator.windowScale(
+            windowFrame: window.frame,
+            displays: Self.connectedDisplays(),
+            fallback: reported
+        )
+    }
+
+    /// The connected displays in the global CoreGraphics space that `SCWindow.frame` uses.
+    private static func connectedDisplays() -> [DisplayGeometry] {
+        NSScreen.screens.compactMap { screen in
+            guard let displayID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID else {
+                return nil
+            }
+            return DisplayGeometry(frame: CGDisplayBounds(displayID), scaleFactor: screen.backingScaleFactor)
+        }
     }
 }
 

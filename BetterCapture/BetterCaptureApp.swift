@@ -6,7 +6,6 @@
 //
 
 import AppKit
-import KeyboardShortcuts
 import SwiftUI
 
 @main
@@ -25,7 +24,6 @@ struct BetterCaptureApp: App {
             MenuBarView(viewModel: viewModel)
                 .task {
                     await viewModel.requestPermissionsOnLaunch()
-                    registerKeyboardShortcuts()
                 }
         } label: {
             MenuBarLabel(viewModel: viewModel)
@@ -35,28 +33,6 @@ struct BetterCaptureApp: App {
         // Settings window
         Settings {
             SettingsView(settings: viewModel.settings, updaterService: updaterService)
-        }
-    }
-
-    // MARK: - Keyboard Shortcuts
-
-    private func registerKeyboardShortcuts() {
-        KeyboardShortcuts.onKeyUp(for: .toggleRecording) { [viewModel] in
-            Task { @MainActor in
-                await viewModel.toggleRecording()
-            }
-        }
-
-        KeyboardShortcuts.onKeyUp(for: .selectContent) { [viewModel] in
-            Task { @MainActor in
-                viewModel.presentPicker()
-            }
-        }
-
-        KeyboardShortcuts.onKeyUp(for: .selectArea) { [viewModel] in
-            Task { @MainActor in
-                await viewModel.presentAreaSelection()
-            }
         }
     }
 }

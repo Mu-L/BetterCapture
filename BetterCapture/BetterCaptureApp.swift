@@ -11,8 +11,13 @@ import SwiftUI
 
 @main
 struct BetterCaptureApp: App {
-    @State private var viewModel = RecorderViewModel()
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var updaterService = UpdaterService()
+
+    /// The recorder lives on the app delegate so URLs can be handled before the
+    /// menu bar popover has ever been opened. See ``AppDelegate``.
+    private var viewModel: RecorderViewModel { appDelegate.viewModel }
+
     var body: some Scene {
         // Menu bar extra - the primary interface
         // Using .window style to support custom toggle switches
@@ -22,9 +27,6 @@ struct BetterCaptureApp: App {
                     await viewModel.requestPermissionsOnLaunch()
                     registerKeyboardShortcuts()
                 }
-                .onOpenURL { url in
-                    handleURL(url)
-                }
         } label: {
             MenuBarLabel(viewModel: viewModel)
         }
@@ -33,42 +35,6 @@ struct BetterCaptureApp: App {
         // Settings window
         Settings {
             SettingsView(settings: viewModel.settings, updaterService: updaterService)
-        }
-    }
-
-    // MARK: - URL Scheme
-
-    private func handleURL(_ url: URL) {
-        guard url.scheme == "bettercapture" else { return }
-
-        switch url.host {
-        case "toggle", "toggle-copy":
-            let copyToClipboard = url.host == "toggle-copy"
-            Task { @MainActor in
-                if viewModel.isRecording {
-                    await viewModel.stopRecording(copyToClipboard: copyToClipboard)
-                } else {
-                    switch ContentSelectionMode.current {
-                    case .pickContent:
-                        viewModel.presentPicker()
-                    case .selectArea:
-                        await viewModel.presentAreaSelection()
-                    }
-                }
-            }
-        case "open-recordings":
-            Task { @MainActor in
-                let settings = viewModel.settings
-                let didStart = settings.startAccessingOutputDirectory()
-                defer {
-                    if didStart {
-                        settings.stopAccessingOutputDirectory()
-                    }
-                }
-                NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: settings.outputDirectory.path)
-            }
-        default:
-            break
         }
     }
 

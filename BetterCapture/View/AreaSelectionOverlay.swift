@@ -202,6 +202,10 @@ final class AreaSelectionView: NSView {
     private var cancelButton: NSButton?
     private var buttonContainer: NSView?
 
+    /// Position of the button container, updated as the selection moves
+    private var buttonContainerCenterX: NSLayoutConstraint?
+    private var buttonContainerCenterY: NSLayoutConstraint?
+
     // MARK: - Initialization
 
     init(frame: NSRect, screen: NSScreen) {
@@ -503,6 +507,15 @@ final class AreaSelectionView: NSView {
         cancel.translatesAutoresizingMaskIntoConstraints = false
         container.translatesAutoresizingMaskIntoConstraints = false
 
+        // The container is centred on the selection through constraints rather than by
+        // assigning its frame. Auto layout owns the frame of a view with
+        // `translatesAutoresizingMaskIntoConstraints` off, and writing to it directly
+        // invalidates the layout it is in the middle of computing.
+        // `leftAnchor` rather than `leadingAnchor`: the selection is a geometric rect and
+        // must not flip with the interface layout direction.
+        let centerX = container.centerXAnchor.constraint(equalTo: leftAnchor)
+        let centerY = container.centerYAnchor.constraint(equalTo: bottomAnchor)
+
         NSLayoutConstraint.activate([
             confirm.topAnchor.constraint(equalTo: container.topAnchor),
             confirm.leadingAnchor.constraint(equalTo: container.leadingAnchor),
@@ -510,12 +523,16 @@ final class AreaSelectionView: NSView {
             cancel.topAnchor.constraint(equalTo: confirm.bottomAnchor, constant: 8),
             cancel.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             cancel.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            cancel.bottomAnchor.constraint(equalTo: container.bottomAnchor)
+            cancel.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            centerX,
+            centerY
         ])
 
         self.confirmButton = confirm
         self.cancelButton = cancel
         self.buttonContainer = container
+        self.buttonContainerCenterX = centerX
+        self.buttonContainerCenterY = centerY
 
         updateButtonPositions()
     }
@@ -523,23 +540,16 @@ final class AreaSelectionView: NSView {
     private func hideActionButtons() {
         buttonContainer?.removeFromSuperview()
         buttonContainer = nil
+        buttonContainerCenterX = nil
+        buttonContainerCenterY = nil
         confirmButton = nil
         cancelButton = nil
     }
 
     private func updateButtonPositions() {
-        guard let container = buttonContainer else { return }
-
-        // Let auto layout calculate the intrinsic size, then position manually
-        container.layoutSubtreeIfNeeded()
-        let fittingSize = container.fittingSize
-
-        container.frame = CGRect(
-            x: selectionRect.midX - fittingSize.width / 2,
-            y: selectionRect.midY - fittingSize.height / 2,
-            width: fittingSize.width,
-            height: fittingSize.height
-        )
+        // The view is unflipped, so both centres are offsets from the bottom-left corner
+        buttonContainerCenterX?.constant = selectionRect.midX
+        buttonContainerCenterY?.constant = selectionRect.midY
     }
 
     private func makeActionButton(title: String, textColor: NSColor, action: Selector) -> NSButton {

@@ -126,6 +126,16 @@ body:
 
   - type: dropdown
     attributes:
+      label: System Audio
+      description: Is system audio capture enabled?
+      options:
+        - Enabled
+        - Disabled
+    validations:
+      required: true
+
+  - type: dropdown
+    attributes:
       label: Microphone
       description: Is microphone capture enabled?
       options:

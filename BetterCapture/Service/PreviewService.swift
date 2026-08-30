@@ -132,7 +132,7 @@ final class PreviewService: NSObject {
 
         } catch let error as NSError {
             // Handle TCC permission errors gracefully
-            if error.domain == "com.apple.ScreenCaptureKit.SCStreamErrorDomain" && error.code == -3801 {
+            if error.domain == SCStreamErrorDomain && error.code == SCStreamError.Code.userDeclined.rawValue {
                 logger.warning("Screen capture permission not granted")
             } else {
                 logger.error("Failed to start preview: \(error.localizedDescription)")
@@ -146,26 +146,27 @@ final class PreviewService: NSObject {
         previewImage = nil
     }
 
-    /// Stops the preview stream
-    func cancelCapture() async {
-        await stopStream()
-    }
-
     // MARK: - Private Methods
 
     private func stopStream() async {
-        if let stream {
-            do {
-                try await stream.stopCapture()
-                logger.info("Preview stream stopped")
-            } catch {
-                logger.error("Failed to stop preview stream: \(error.localizedDescription)")
-            }
-            self.stream = nil
-        }
-
-        // Always ensure isCapturing is false
+        // Detach the stream before suspending. `stopCapture()` is an await, so leaving the
+        // property set across it lets a second caller in on the main actor, see the same
+        // stream and stop it again - which fails with `attemptToStopStreamState`.
+        let runningStream = stream
+        stream = nil
         isCapturing = false
+
+        guard let runningStream else { return }
+
+        do {
+            try await runningStream.stopCapture()
+            logger.info("Preview stream stopped")
+        } catch let error as NSError where error.code == SCStreamError.Code.attemptToStopStreamState.rawValue {
+            // The stream had already stopped on its own, which is what was wanted
+            logger.debug("Preview stream was already stopped")
+        } catch {
+            logger.error("Failed to stop preview stream: \(error.localizedDescription)")
+        }
     }
 
     private func createPreviewConfiguration() -> SCStreamConfiguration {
@@ -223,10 +224,10 @@ extension PreviewService: SCStreamDelegate {
 
             let nsError = error as NSError
 
-            // Check if the user clicked "Stop Sharing" in the system UI
-            // Error code -3808 or localized description contains "user stopped"
-            let userStoppedSharing = nsError.code == -3808 ||
-                                    error.localizedDescription.localizedStandardContains("user stopped")
+            // Check if the user clicked "Stop Sharing" in the system UI.
+            // `attemptToStopStreamState` (-3808) is a different failure - stopping an already
+            // stopped stream - and must not be mistaken for a user cancellation.
+            let userStoppedSharing = nsError.code == SCStreamError.Code.userStopped.rawValue
 
             if userStoppedSharing {
                 logger.info("User clicked 'Stop Sharing', clearing preview and notifying delegate")
@@ -237,7 +238,7 @@ extension PreviewService: SCStreamDelegate {
                 // Notify delegate to clear selection
                 self.delegate?.previewServiceDidStopByUser(self)
 
-            } else if nsError.domain == "com.apple.ScreenCaptureKit.SCStreamErrorDomain" && nsError.code == -3801 {
+            } else if nsError.domain == SCStreamErrorDomain && nsError.code == SCStreamError.Code.userDeclined.rawValue {
                 logger.warning("Preview stream stopped: permission not granted")
             } else {
                 logger.error("Preview stream stopped with error: \(error.localizedDescription)")

@@ -81,7 +81,11 @@ final class ContentFilterService {
         return isConnected
     }
 
-    /// Applies user settings to a content filter for display capture
+    /// Applies user settings to a content filter
+    ///
+    /// The filter is rebuilt in place for its own style. A filter is never widened: if any
+    /// assumption about its shape does not hold, the picker's filter is returned untouched
+    /// rather than replaced by something that captures more than the user selected.
     /// - Parameters:
     ///   - filter: The original filter from the content picker
     ///   - settings: User settings for content visibility
@@ -90,14 +94,40 @@ final class ContentFilterService {
         // Menu bar can be set directly on any filter
         filter.includeMenuBar = settings.showMenuBar
 
-        // For wallpaper and dock exclusion, we need to rebuild the filter for display capture
+        let captureStyle = CaptureFilterStyle(filter)
+
+        logger.info("""
+            Filter shape - captures: \(String(describing: captureStyle)), \
+            reported style: \(filter.style.rawValue), \
+            displays: \(filter.includedDisplays.count), \
+            applications: \(filter.includedApplications.count), \
+            windows: \(filter.includedWindows.count)
+            """)
+
+        switch captureStyle {
+        case .display:
+            return try await applyToDisplayFilter(filter, settings: settings)
+        case .application:
+            return try await applyToApplicationFilter(filter, settings: settings)
+        case .window, .unknown:
+            // Nothing here can be rebuilt without widening the capture
+            logger.info("Filter needs no rebuild, returning with menu bar setting only")
+            return filter
+        }
+    }
+
+    // MARK: - Display Capture
+
+    /// Rebuilds a display filter so hidden surfaces are excluded window by window
+    private func applyToDisplayFilter(_ filter: SCContentFilter, settings: SettingsStore) async throws -> SCContentFilter {
+        let visibility = ContentVisibility(settings: settings)
+
         guard let display = filter.includedDisplays.first else {
-            logger.info("Filter is not a display capture, returning with menu bar setting only")
+            logger.warning("Display filter without a display, returning picker filter as-is")
             return filter
         }
 
-        // If both wallpaper and dock are shown and BetterCapture is shown, no need to rebuild the filter
-        if settings.showWallpaper && settings.showDock && settings.showBetterCapture {
+        guard ContentFilterRules.requiresRebuild(visibility: visibility) else {
             logger.info("No exclusions needed, returning original filter")
             return filter
         }
@@ -108,53 +138,91 @@ final class ContentFilterService {
             return filter
         }
 
-        // Get all available windows to find wallpaper/dock
-        let content = try await SCShareableContent.current
-        let availableWindows = content.windows.filter { $0.isOnScreen }
-
-        var excludedWindows: [SCWindow] = []
-
-        for window in availableWindows {
-            let bundleID = window.owningApplication?.bundleIdentifier ?? ""
-            let windowTitle = window.title ?? ""
-
-            // Backstop is a macOS 26 layer behind wallpaper - exclude when hiding wallpaper
-            // Note: Backstop may not be owned by com.apple.dock
-            if !settings.showWallpaper && windowTitle.contains("Backstop") {
-                excludedWindows.append(window)
-                logger.debug("Excluding backstop window: \(windowTitle)")
-                continue
-            }
-
-            // Exclude BetterCapture's own windows if showBetterCapture is false
-            if !settings.showBetterCapture && bundleID == Bundle.main.bundleIdentifier {
-                excludedWindows.append(window)
-                logger.debug("Excluding BetterCapture window: \(windowTitle)")
-                continue
-            }
-
-            // Wallpaper and Dock are both owned by com.apple.dock
-            guard bundleID == "com.apple.dock" else { continue }
-
-            let isWallpaper = windowTitle.hasPrefix("Wallpaper-")
-
-            if !settings.showWallpaper && isWallpaper {
-                excludedWindows.append(window)
-                logger.debug("Excluding wallpaper window: \(windowTitle)")
-            }
-
-            if !settings.showDock && !isWallpaper {
-                excludedWindows.append(window)
-                logger.debug("Excluding dock window: \(windowTitle)")
-            }
-        }
+        let onScreenWindows = try await onScreenWindows()
+        let excludedIDs = Set(ContentFilterRules.excludedWindowIDs(
+            from: onScreenWindows.map(CapturableWindow.init),
+            visibility: visibility
+        ))
+        let excludedWindows = onScreenWindows.filter { excludedIDs.contains($0.windowID) }
 
         logger.info("Excluding \(excludedWindows.count) windows from capture")
 
-        // Create new filter with excluded windows
         let newFilter = SCContentFilter(display: display, excludingWindows: excludedWindows)
         newFilter.includeMenuBar = settings.showMenuBar
 
         return newFilter
+    }
+
+    // MARK: - Application Capture
+
+    /// Composites wallpaper and Dock behind an application capture
+    ///
+    /// ScreenCaptureKit renders an application filter on black unless the Dock application —
+    /// which owns both the wallpaper and the Dock itself — is part of the capture. The two
+    /// surfaces are separated again through `exceptingWindows`.
+    private func applyToApplicationFilter(_ filter: SCContentFilter, settings: SettingsStore) async throws -> SCContentFilter {
+        let visibility = ContentVisibility(settings: settings)
+
+        // App on black. Nothing to composite, so leave the picker's filter alone.
+        guard ContentFilterRules.includesDockApplication(visibility: visibility) else {
+            logger.info("Wallpaper and dock both hidden, keeping application filter as-is")
+            return filter
+        }
+
+        guard let display = filter.includedDisplays.first,
+              !filter.includedApplications.isEmpty,
+              hasScreenRecordingPermission() else {
+            logger.warning("Cannot rebuild application filter, using picker filter as-is")
+            return filter
+        }
+
+        let content = try await SCShareableContent.current
+        let onScreenWindows = content.windows.filter(\.isOnScreen)
+
+        guard let dockApp = content.applications.first(where: { $0.bundleIdentifier == ContentFilterRules.dockBundleID }) else {
+            logger.warning("Dock application not found, using picker filter as-is")
+            return filter
+        }
+
+        let exceptionIDs = Set(ContentFilterRules.dockExceptionWindowIDs(
+            from: onScreenWindows.map(CapturableWindow.init),
+            visibility: visibility
+        ))
+        let exceptions = onScreenWindows.filter { exceptionIDs.contains($0.windowID) }
+
+        logger.info("Compositing application capture with \(exceptions.count) dock windows excepted")
+
+        // Keep the application restriction rather than snapshotting windows, so windows the
+        // app opens mid-recording are captured too.
+        let newFilter = SCContentFilter(
+            display: display,
+            including: filter.includedApplications + [dockApp],
+            exceptingWindows: exceptions
+        )
+        newFilter.includeMenuBar = settings.showMenuBar
+
+        return newFilter
+    }
+
+    // MARK: - Helpers
+
+    /// The currently visible windows across all displays
+    private func onScreenWindows() async throws -> [SCWindow] {
+        let content = try await SCShareableContent.current
+        return content.windows.filter(\.isOnScreen)
+    }
+}
+
+// MARK: - CapturableWindow Bridging
+
+private extension CapturableWindow {
+
+    /// Reduces a ScreenCaptureKit window to the properties the filter rules need
+    init(_ window: SCWindow) {
+        self.init(
+            id: window.windowID,
+            bundleID: window.owningApplication?.bundleIdentifier ?? "",
+            title: window.title ?? ""
+        )
     }
 }

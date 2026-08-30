@@ -22,10 +22,12 @@ struct MenuBarView: View {
             // Permission status banner (only when idle)
             if !isRecording,
                viewModel.permissionService.screenRecordingState != .granted ||
-                (viewModel.settings.captureMicrophone && viewModel.permissionService.microphoneState != .granted) {
+                (viewModel.settings.captureMicrophone && viewModel.permissionService.microphoneState != .granted) ||
+                (viewModel.settings.presenterOverlayEnabled && viewModel.permissionService.cameraState != .granted) {
                 PermissionStatusBanner(
                     permissionService: viewModel.permissionService,
-                    showMicrophonePermission: viewModel.settings.captureMicrophone
+                    showMicrophonePermission: viewModel.settings.captureMicrophone,
+                    showCameraPermission: viewModel.settings.presenterOverlayEnabled
                 )
                 MenuBarDivider()
             }
@@ -109,7 +111,8 @@ struct MenuBarView: View {
 
                 PresenterOverlaySettingsSection(
                     settings: viewModel.settings,
-                    cameraDeviceService: viewModel.cameraDeviceService
+                    cameraDeviceService: viewModel.cameraDeviceService,
+                    permissionService: viewModel.permissionService
                 )
 
                 AudioSettingsSection(
@@ -378,6 +381,7 @@ struct ContentSelectionButton: View {
 struct PermissionStatusBanner: View {
     let permissionService: PermissionService
     let showMicrophonePermission: Bool
+    let showCameraPermission: Bool
 
     var body: some View {
         VStack(spacing: 4) {
@@ -406,6 +410,15 @@ struct PermissionStatusBanner: View {
                     isGranted: false
                 ) {
                     permissionService.openMicrophoneSettings()
+                }
+            }
+
+            if showCameraPermission && permissionService.cameraState != .granted {
+                PermissionRow(
+                    title: "Camera",
+                    isGranted: false
+                ) {
+                    permissionService.openCameraSettings()
                 }
             }
         }

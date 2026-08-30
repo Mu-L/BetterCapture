@@ -116,7 +116,10 @@ final class RecorderViewModel {
     /// Requests required permissions on app launch
     /// Only requests microphone permission if microphone capture is enabled
     func requestPermissionsOnLaunch() async {
-        await permissionService.requestPermissions(includeMicrophone: settings.captureMicrophone)
+        await permissionService.requestPermissions(
+            includeMicrophone: settings.captureMicrophone,
+            includeCamera: settings.presenterOverlayEnabled
+        )
     }
 
     /// Refreshes the current permission states
@@ -260,8 +263,14 @@ final class RecorderViewModel {
             try assetWriter.startWriting()
             logger.info("AssetWriter ready")
 
-            // Start camera for Presenter Overlay before capture so the system detects it
+            // Start camera for Presenter Overlay before capture so the system detects it.
+            // The camera has to be running before the SCStream starts, which is earlier than
+            // the engine's own permission checks, so camera access is verified here instead.
             if settings.presenterOverlayEnabled {
+                guard await permissionService.requestCameraPermission() else {
+                    throw CaptureError.cameraPermissionDenied
+                }
+
                 await cameraSession.start(deviceID: settings.selectedCameraID)
             }
 

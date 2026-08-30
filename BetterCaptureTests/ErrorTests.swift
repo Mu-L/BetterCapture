@@ -49,6 +49,7 @@ struct ErrorTests {
             .captureAlreadyRunning,
             .screenRecordingPermissionDenied,
             .microphonePermissionDenied,
+            .cameraPermissionDenied,
             .selectedDisplayDisconnected
         ]
 
@@ -66,6 +67,11 @@ struct ErrorTests {
 
     @Test func captureErrorMicrophoneMentionsPermission() {
         let error = CaptureError.microphonePermissionDenied
+        #expect(error.errorDescription?.localizedStandardContains("permission") == true)
+    }
+
+    @Test func captureErrorCameraMentionsPermission() {
+        let error = CaptureError.cameraPermissionDenied
         #expect(error.errorDescription?.localizedStandardContains("permission") == true)
     }
 }

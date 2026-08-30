@@ -630,6 +630,7 @@ struct CameraExpandablePicker: View {
 struct PresenterOverlaySettingsSection: View {
     @Bindable var settings: SettingsStore
     let cameraDeviceService: CameraDeviceService
+    let permissionService: PermissionService
 
     var body: some View {
         VStack(spacing: 0) {
@@ -646,6 +647,14 @@ struct PresenterOverlaySettingsSection: View {
                 )
             }
         }
+        .onChange(of: settings.presenterOverlayEnabled) { _, isEnabled in
+            // Ask up front rather than letting the first recording fail on a denied camera
+            guard isEnabled else { return }
+
+            Task {
+                await permissionService.requestCameraPermission()
+            }
+        }
     }
 }
 
@@ -654,7 +663,11 @@ struct PresenterOverlaySettingsSection: View {
 #Preview {
     VStack(spacing: 0) {
         VideoSettingsSection(settings: SettingsStore())
-        PresenterOverlaySettingsSection(settings: SettingsStore(), cameraDeviceService: CameraDeviceService())
+        PresenterOverlaySettingsSection(
+            settings: SettingsStore(),
+            cameraDeviceService: CameraDeviceService(),
+            permissionService: PermissionService()
+        )
         AudioSettingsSection(settings: SettingsStore(), audioDeviceService: AudioDeviceService())
     }
     .frame(width: 320)

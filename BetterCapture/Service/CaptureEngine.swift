@@ -322,11 +322,6 @@ final class CaptureEngine: NSObject {
             config.microphoneCaptureDeviceID = microphoneID
         }
 
-        // Presenter Overlay: always show the alert so the user knows overlay is available
-        if settings.presenterOverlayEnabled {
-            config.presenterOverlayPrivacyAlertSetting = .always
-        }
-
         return config
     }
 
@@ -453,6 +448,7 @@ enum CaptureError: LocalizedError, Equatable {
     case captureAlreadyRunning
     case screenRecordingPermissionDenied
     case microphonePermissionDenied
+    case cameraPermissionDenied
     case selectedDisplayDisconnected
 
     var errorDescription: String? {
@@ -467,6 +463,8 @@ enum CaptureError: LocalizedError, Equatable {
             return "Screen recording permission is required. Please grant permission in System Settings → Privacy & Security → Screen Recording."
         case .microphonePermissionDenied:
             return "Microphone permission is required. Please grant permission in System Settings → Privacy & Security → Microphone."
+        case .cameraPermissionDenied:
+            return "Camera permission is required for Presenter Overlay. Please grant permission in System Settings → Privacy & Security → Camera, or turn off Presenter Overlay."
         case .selectedDisplayDisconnected:
             return "The selected display is no longer connected. Please select the content to capture again."
         }

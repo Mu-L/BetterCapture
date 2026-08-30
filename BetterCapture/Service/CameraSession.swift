@@ -54,23 +54,7 @@ final class CameraSession {
             let input = try AVCaptureDeviceInput(device: device)
             let newSession = AVCaptureSession()
 
-            newSession.beginConfiguration()
-
-            guard newSession.canAddInput(input) else {
-                logger.error("Cannot add camera input to session")
-                return
-            }
-            newSession.addInput(input)
-
-            // An output is required for the system to consider the camera active.
-            let output = AVCaptureVideoDataOutput()
-            guard newSession.canAddOutput(output) else {
-                logger.error("Cannot add video output to session")
-                return
-            }
-            newSession.addOutput(output)
-
-            newSession.commitConfiguration()
+            guard configure(newSession, with: input) else { return }
 
             session = newSession
 
@@ -89,6 +73,33 @@ final class CameraSession {
         } catch {
             logger.error("Failed to start camera session: \(error.localizedDescription)")
         }
+    }
+
+    /// Adds the camera input and a discarding video output to the session.
+    ///
+    /// The configuration is always committed, including on the failure paths, so an
+    /// unusable session is never left half-configured.
+    ///
+    /// - Returns: `true` if both the input and the output were added.
+    private func configure(_ session: AVCaptureSession, with input: AVCaptureDeviceInput) -> Bool {
+        session.beginConfiguration()
+        defer { session.commitConfiguration() }
+
+        guard session.canAddInput(input) else {
+            logger.error("Cannot add camera input to session")
+            return false
+        }
+        session.addInput(input)
+
+        // An output is required for the system to consider the camera active.
+        let output = AVCaptureVideoDataOutput()
+        guard session.canAddOutput(output) else {
+            logger.error("Cannot add video output to session")
+            return false
+        }
+        session.addOutput(output)
+
+        return true
     }
 
     /// Stops the capture session and releases resources.

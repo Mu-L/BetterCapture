@@ -27,6 +27,7 @@ final class PermissionService {
 
     private(set) var screenRecordingState: PermissionState = .unknown
     private(set) var microphoneState: PermissionState = .unknown
+    private(set) var cameraState: PermissionState = .unknown
 
     var allPermissionsGranted: Bool {
         screenRecordingState == .granted && microphoneState == .granted
@@ -53,8 +54,12 @@ final class PermissionService {
     func updatePermissionStates() {
         screenRecordingState = checkScreenRecordingPermission()
         microphoneState = checkMicrophonePermission()
+        cameraState = checkCameraPermission()
 
-        logger.info("Permission states - Screen: \(String(describing: self.screenRecordingState)), Microphone: \(String(describing: self.microphoneState))")
+        let screen = String(describing: screenRecordingState)
+        let microphone = String(describing: microphoneState)
+        let camera = String(describing: cameraState)
+        logger.info("Permission states - Screen: \(screen), Microphone: \(microphone), Camera: \(camera)")
     }
 
     private func checkScreenRecordingPermission() -> PermissionState {
@@ -62,7 +67,15 @@ final class PermissionService {
     }
 
     private func checkMicrophonePermission() -> PermissionState {
-        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        state(for: .audio)
+    }
+
+    private func checkCameraPermission() -> PermissionState {
+        state(for: .video)
+    }
+
+    private func state(for mediaType: AVMediaType) -> PermissionState {
+        switch AVCaptureDevice.authorizationStatus(for: mediaType) {
         case .authorized:
             return .granted
         case .notDetermined:
@@ -77,9 +90,11 @@ final class PermissionService {
     // MARK: - Permission Requests
 
     /// Requests required permissions on app launch
-    /// - Parameter includeMicrophone: Whether to also request microphone permission
-    func requestPermissions(includeMicrophone: Bool) async {
-        logger.info("Requesting permissions (includeMicrophone: \(includeMicrophone))...")
+    /// - Parameters:
+    ///   - includeMicrophone: Whether to also request microphone permission
+    ///   - includeCamera: Whether to also request camera permission
+    func requestPermissions(includeMicrophone: Bool, includeCamera: Bool) async {
+        logger.info("Requesting permissions (includeMicrophone: \(includeMicrophone), includeCamera: \(includeCamera))...")
 
         // Request screen recording permission first (synchronous)
         requestScreenRecordingPermission()
@@ -87,6 +102,11 @@ final class PermissionService {
         // Request microphone permission only if needed (asynchronous)
         if includeMicrophone {
             await requestMicrophonePermission()
+        }
+
+        // Camera is only used by Presenter Overlay, so it is only requested when that is on
+        if includeCamera {
+            await requestCameraPermission()
         }
 
         // Update states after requests
@@ -119,6 +139,26 @@ final class PermissionService {
         }
     }
 
+    /// Requests camera permission, used by Presenter Overlay
+    /// - Returns: true if permission is granted
+    @discardableResult
+    func requestCameraPermission() async -> Bool {
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .authorized:
+            cameraState = .granted
+        case .notDetermined:
+            let granted = await AVCaptureDevice.requestAccess(for: .video)
+            cameraState = granted ? .granted : .denied
+            logger.info("Camera permission request result: \(granted)")
+        case .denied, .restricted:
+            cameraState = .denied
+        @unknown default:
+            cameraState = .unknown
+        }
+
+        return cameraState == .granted
+    }
+
     /// Opens System Settings to the Screen Recording preferences pane
     func openScreenRecordingSettings() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
@@ -129,6 +169,13 @@ final class PermissionService {
     /// Opens System Settings to the Microphone preferences pane
     func openMicrophoneSettings() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    /// Opens System Settings to the Camera preferences pane
+    func openCameraSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Camera") {
             NSWorkspace.shared.open(url)
         }
     }

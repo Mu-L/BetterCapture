@@ -142,6 +142,20 @@ final class NotificationService: NSObject {
         )
     }
 
+    /// Sends a notification when system audio could not be captured
+    ///
+    /// The video recording continues, so this is reported without stopping anything.
+    /// - Parameter error: The error that prevented system audio capture, if any
+    func sendSystemAudioFailedNotification(error: Error?) {
+        let reason = error.map { ": \($0.localizedDescription)" } ?? ""
+
+        send(
+            title: "System Audio Not Recorded",
+            body: "Recording continues without system audio\(reason)",
+            category: NotificationIdentifier.categoryRecordingFailed
+        )
+    }
+
     /// Sends a notification when recording stopped unexpectedly
     /// - Parameter error: Optional error that caused the stop
     func sendRecordingStoppedNotification(error: Error?) {

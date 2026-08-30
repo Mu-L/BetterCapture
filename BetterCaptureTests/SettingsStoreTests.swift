@@ -79,6 +79,16 @@ struct SettingsStoreTests {
         #expect(store.showBetterCapture == false)
     }
 
+    @Test func defaultCaptureSystemAudioIsTrue() {
+        let store = makeStore()
+        #expect(store.captureSystemAudio == true)
+    }
+
+    @Test func defaultCaptureMicrophoneIsFalse() {
+        let store = makeStore()
+        #expect(store.captureMicrophone == false)
+    }
+
     // MARK: - Codec/Container Compatibility
 
     @Test func settingProResToMP4SwitchesContainerToMOV() {

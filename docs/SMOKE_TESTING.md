@@ -8,7 +8,7 @@ This document outlines the manual testing matrix for BetterCapture. These tests 
 | --- | ----------------------------------- | ------------------------------------- | ----------- | ------------------ | ------------- | --------------------------------------------------- | ---------------------------------- |
 | 1   | Basic display recording             | Full display (built-in)               | H.264       | System audio only  | SDR           | MOV/MP4 file with system audio, no errors           | Baseline test                      |
 | 2   | Window capture with movement        | Single window (move during recording) | HEVC        | No audio           | SDR           | Window stays in frame, smooth tracking              | Test content filter                |
-| 3   | Application group recording         | Application group                     | ProRes 422  | System + Mic mix   | SDR           | All app windows captured, both audio tracks present | Test multi-audio                   |
+| 3   | Application group recording         | Application group                     | ProRes 422  | System + Mic mix   | SDR           | Only the selected app's windows visible, other apps absent, wallpaper and Dock present, both audio tracks present | Test app scoping and multi-audio   |
 | 4   | Alpha channel transparency          | Single window (transparent areas)     | ProRes 4444 | No audio           | Alpha enabled | Transparent areas preserved in output               | Requires MOV                       |
 | 5   | HDR color accuracy                  | Full display (HDR content)            | ProRes 422  | No audio           | HDR enabled   | 10-bit output with correct color space              | Visual verification                |
 | 6   | External display capture            | Full display (external)               | H.264       | System audio only  | SDR           | External display captured correctly                 | Test multi-monitor                 |
@@ -27,29 +27,33 @@ This document outlines the manual testing matrix for BetterCapture. These tests 
 | 19  | Minimum area selection              | Custom area (24pt minimum)            | H.264       | No audio           | SDR           | Small area captured, no errors                      | Test boundary conditions           |
 | 20  | User stops sharing (system UI)      | Full display                          | H.264       | System audio only  | SDR           | Recording stops gracefully, file saved              | Click system "Stop Sharing" button |
 | 21  | Disconnected display still selected | Full display (external, unplugged)    | H.264       | System audio only  | SDR           | Start refused with notice, selection cleared        | Unplug display before recording    |
+| 22  | Application capture on black        | Application group                     | H.264       | No audio           | SDR           | App windows on a black background, no wallpaper, no Dock, no other apps | Show Wallpaper and Show Dock both off |
+| 23  | Window capture hears other apps     | Single window (app A)                 | H.264       | System audio only  | SDR           | App B's audio is in the recording                   | Play audio in app B throughout     |
+| 24  | Application capture hears other apps | Application group (app A)            | H.264       | System audio only  | SDR           | App B's audio is in the recording                   | Play audio in app B throughout     |
+| 25  | Window shadow toggle                | Single window (floating on desktop)   | H.264       | No audio           | SDR           | Drop shadow absent when the toggle is off, present when on | Test `showWindowShadows`     |
 
 ## Test Coverage Summary
 
 ### Content Sources (3 types)
 
 - **Full Display**: Tests 1, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 16, 17, 18, 20, 21
-- **Single Window**: Tests 2, 14
-- **Application Group**: Test 3
+- **Single Window**: Tests 2, 14, 23, 25
+- **Application Group**: Tests 3, 22, 24
 - **Custom Area**: Tests 7, 19
 
 ### Video Codecs (4 types)
 
-- **H.264**: Tests 1, 6, 8, 9, 10, 11, 13, 16, 17, 18, 19, 20, 21
+- **H.264**: Tests 1, 6, 8, 9, 10, 11, 13, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25
 - **HEVC (H.265)**: Tests 2, 7, 12, 14, 15
 - **ProRes 422**: Tests 3, 5
 - **ProRes 4444**: Test 4
 
 ### Audio Configurations (4 types)
 
-- **System Audio Only**: Tests 1, 6, 7, 10, 11, 12, 17, 20, 21
+- **System Audio Only**: Tests 1, 6, 7, 10, 11, 12, 17, 20, 21, 23, 24
 - **Microphone Only**: Test 8
 - **System + Microphone Mix**: Tests 3, 13, 18
-- **No Audio**: Tests 2, 4, 5, 9, 14, 15, 16, 19
+- **No Audio**: Tests 2, 4, 5, 9, 14, 15, 16, 19, 22, 25
 
 ### Special Features
 
@@ -58,8 +62,9 @@ This document outlines the manual testing matrix for BetterCapture. These tests 
 - **Presenter Overlay**: Test 13
 - **PCM Audio**: Test 17
 - **High/Native Frame Rates**: Tests 14, 15
-- **Content Filters**: Test 16
+- **Content Filters**: Tests 16, 22, 25
 - **Area Selection**: Tests 7, 19
+- **Content-Independent System Audio**: Tests 23, 24
 
 ### Edge Cases
 
@@ -105,3 +110,7 @@ This document outlines the manual testing matrix for BetterCapture. These tests 
 - MP4 container supports H.264/HEVC only, no alpha
 - Area selection requires minimum 24pt size
 - Native frame rate follows the display but is capped at 60 fps
+- Application capture renders at display size, showing only the selected app's windows over the
+  wallpaper and Dock. Turning off both Show Wallpaper and Show Dock gives the app on black.
+- Window and application captures record system audio through a second, full-display stream, so
+  audio is never scoped to the selected content

@@ -425,7 +425,7 @@ final class SettingsStore {
     var captureSystemAudio: Bool {
         get {
             access(keyPath: \.captureSystemAudio)
-            return defaults.bool(forKey: "captureSystemAudio")
+            return defaults.object(forKey: "captureSystemAudio") as? Bool ?? true
         }
         set {
             withMutation(keyPath: \.captureSystemAudio) {

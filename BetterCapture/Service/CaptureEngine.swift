@@ -14,6 +14,7 @@ import OSLog
 protocol CaptureEngineDelegate: AnyObject {
     func captureEngine(_ engine: CaptureEngine, didUpdateFilter filter: SCContentFilter)
     func captureEngine(_ engine: CaptureEngine, didStopWithError error: Error?)
+    func captureEngine(_ engine: CaptureEngine, systemAudioDidFailWith error: Error?)
     func captureEngineDidCancelPicker(_ engine: CaptureEngine)
     func captureEngine(_ engine: CaptureEngine, presenterOverlayDidChange isActive: Bool)
 }
@@ -42,6 +43,7 @@ final class CaptureEngine: NSObject {
     private(set) var isPresenterOverlayActive = false
 
     private var stream: SCStream?
+    private let systemAudioStream = SystemAudioStream()
     private let picker = SCContentSharingPicker.shared
     private let contentFilterService = ContentFilterService()
 
@@ -103,28 +105,7 @@ final class CaptureEngine: NSObject {
             throw CaptureError.noContentFilterSelected
         }
 
-        // Check for screen recording permission before starting capture
-        let hasPermission = contentFilterService.hasScreenRecordingPermission()
-        logger.info("Screen recording permission check: \(hasPermission)")
-
-        guard hasPermission else {
-            // Request permission - this will open the system prompt or System Settings
-            contentFilterService.requestScreenRecordingPermission()
-            throw CaptureError.screenRecordingPermissionDenied
-        }
-
-        // Check for microphone permission if microphone capture is enabled
-        if settings.captureMicrophone {
-            let hasMicPermission = contentFilterService.hasMicrophonePermission()
-            logger.info("Microphone permission check: \(hasMicPermission)")
-
-            if !hasMicPermission {
-                let granted = await contentFilterService.requestMicrophonePermission()
-                if !granted {
-                    throw CaptureError.microphonePermissionDenied
-                }
-            }
-        }
+        try await verifyPermissions(for: settings)
 
         // A display selected before it was disconnected still yields a usable filter, but the
         // stream never delivers frames. Fail fast instead of recording without a video track.
@@ -137,7 +118,19 @@ final class CaptureEngine: NSObject {
         let filteredContent = try await contentFilterService.applySettings(to: filter, settings: settings)
         logger.info("Content filter applied, creating stream...")
 
-        let streamConfig = createStreamConfiguration(from: settings, contentSize: videoSize, sourceRect: sourceRect, isWindowCapture: filteredContent.style == .window)
+        // A stream's audio is scoped by its video filter, so a window or application capture
+        // would only record the selected app's audio. Those styles get a dedicated
+        // full-display audio stream instead; display captures already hear everything.
+        let captureStyle = CaptureFilterStyle(filteredContent)
+        let needsDedicatedAudioStream = settings.captureSystemAudio && captureStyle != .display
+
+        let streamConfig = createStreamConfiguration(
+            from: settings,
+            contentSize: videoSize,
+            sourceRect: sourceRect,
+            isWindowCapture: captureStyle == .window,
+            capturesAudio: settings.captureSystemAudio && !needsDedicatedAudioStream
+        )
 
         stream = SCStream(filter: filteredContent, configuration: streamConfig, delegate: self)
 
@@ -148,11 +141,13 @@ final class CaptureEngine: NSObject {
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: videoSampleQueue)
         logger.info("Added screen output")
 
-        if settings.captureSystemAudio {
+        if settings.captureSystemAudio && !needsDedicatedAudioStream {
             try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: audioSampleQueue)
             logger.info("Added system audio output")
         }
 
+        // The microphone is device-scoped rather than filter-scoped, so it always stays on
+        // the main stream.
         if settings.captureMicrophone {
             try stream.addStreamOutput(self, type: .microphone, sampleHandlerQueue: microphoneSampleQueue)
             logger.info("Added microphone output (device: \(settings.selectedMicrophoneID ?? "default"))")
@@ -164,17 +159,62 @@ final class CaptureEngine: NSObject {
         logger.info("Stream capture started successfully")
         isCapturing = true
 
+        if needsDedicatedAudioStream {
+            await startSystemAudioStream()
+        }
+
         logger.info("Capture started successfully")
+    }
+
+    /// Ensures the permissions the requested capture needs are granted, prompting if they are not
+    /// - Parameter settings: The settings store containing capture configuration
+    private func verifyPermissions(for settings: SettingsStore) async throws {
+        let hasPermission = contentFilterService.hasScreenRecordingPermission()
+        logger.info("Screen recording permission check: \(hasPermission)")
+
+        guard hasPermission else {
+            // Request permission - this will open the system prompt or System Settings
+            contentFilterService.requestScreenRecordingPermission()
+            throw CaptureError.screenRecordingPermissionDenied
+        }
+
+        guard settings.captureMicrophone else { return }
+
+        let hasMicPermission = contentFilterService.hasMicrophonePermission()
+        logger.info("Microphone permission check: \(hasMicPermission)")
+
+        if !hasMicPermission, await !contentFilterService.requestMicrophonePermission() {
+            throw CaptureError.microphonePermissionDenied
+        }
+    }
+
+    /// Starts the dedicated system audio stream, keeping the recording alive if it fails
+    private func startSystemAudioStream() async {
+        do {
+            try await systemAudioStream.start(output: self, delegate: self, sampleQueue: audioSampleQueue)
+        } catch {
+            logger.error("Failed to start system audio stream: \(error.localizedDescription)")
+            delegate?.captureEngine(self, systemAudioDidFailWith: error)
+        }
     }
 
     /// Stops the current capture stream
     func stopCapture() async throws {
-        guard let stream, isCapturing else { return }
+        await systemAudioStream.stop()
 
-        try await stream.stopCapture()
-        self.stream = nil
+        guard let runningStream = stream, isCapturing else { return }
+
+        // Detach before suspending, so a second caller cannot stop the same stream again
+        stream = nil
         isCapturing = false
         isPresenterOverlayActive = false
+
+        do {
+            try await runningStream.stopCapture()
+        } catch let error as NSError where error.code == SCStreamError.Code.attemptToStopStreamState.rawValue {
+            // The stream had already stopped on its own, which is what was wanted
+            logger.debug("Stream was already stopped")
+        }
 
         logger.info("Capture stopped successfully")
     }
@@ -197,11 +237,13 @@ final class CaptureEngine: NSObject {
     ///   - contentSize: The output dimensions for the captured video
     ///   - sourceRect: Optional rectangle for area selection (display points, top-left origin)
     ///   - isWindowCapture: Whether the filter captures a single window
+    ///   - capturesAudio: Whether this stream carries system audio, or a dedicated one does
     private func createStreamConfiguration(
         from settings: SettingsStore,
         contentSize: CGSize,
         sourceRect: CGRect? = nil,
-        isWindowCapture: Bool = false
+        isWindowCapture: Bool = false,
+        capturesAudio: Bool = false
     ) -> SCStreamConfiguration {
         let config: SCStreamConfiguration
 
@@ -265,8 +307,12 @@ final class CaptureEngine: NSObject {
         // Cursor visibility
         config.showsCursor = settings.showCursor
 
+        // Window shadows
+        config.ignoreShadowsDisplay = !settings.showWindowShadows
+        config.ignoreShadowsSingleWindow = !settings.showWindowShadows
+
         // System audio settings
-        config.capturesAudio = settings.captureSystemAudio
+        config.capturesAudio = capturesAudio
         config.sampleRate = 48000
         config.channelCount = 2
 
@@ -340,9 +386,21 @@ extension CaptureEngine: SCContentSharingPickerObserver {
 extension CaptureEngine: SCStreamDelegate {
 
     nonisolated func stream(_ stream: SCStream, didStopWithError error: any Error) {
+        // Resolve the identity here: SCStream is not Sendable and cannot cross to the main actor.
+        let isSystemAudioStream = systemAudioStream.owns(stream)
+
         Task { @MainActor in
+            guard !isSystemAudioStream else {
+                // Losing system audio must not tear down the video recording
+                self.systemAudioStream.handleStoppedExternally()
+                self.delegate?.captureEngine(self, systemAudioDidFailWith: error)
+                logger.error("System audio stream stopped with error: \(error.localizedDescription)")
+                return
+            }
+
             self.isCapturing = false
             self.stream = nil
+            await self.systemAudioStream.stop()
             self.delegate?.captureEngine(self, didStopWithError: error)
             logger.error("Stream stopped with error: \(error.localizedDescription)")
         }

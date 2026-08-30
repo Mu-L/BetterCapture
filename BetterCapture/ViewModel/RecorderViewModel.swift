@@ -527,6 +527,12 @@ extension RecorderViewModel: CaptureEngineDelegate {
         }
     }
 
+    func captureEngine(_ engine: CaptureEngine, systemAudioDidFailWith error: Error?) {
+        // The video recording keeps running; only system audio is missing from the output
+        logger.error("System audio capture failed: \(error?.localizedDescription ?? "unknown error")")
+        notificationService.sendSystemAudioFailedNotification(error: error)
+    }
+
     func captureEngine(_ engine: CaptureEngine, presenterOverlayDidChange isActive: Bool) {
         isPresenterOverlayActive = isActive
         logger.info("Presenter Overlay \(isActive ? "activated" : "deactivated")")
@@ -543,7 +549,7 @@ extension RecorderViewModel: CaptureEngineDelegate {
 
         // Stop and clear the preview
         Task {
-            await previewService.cancelCapture()
+            await previewService.stopPreview()
             previewService.clearPreview()
         }
     }
